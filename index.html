@@ -3,91 +3,156 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <meta name="mobile-web-app-capable" content="yes">
-    <meta name="apple-mobile-web-app-status-bar-style" content="black">
-    <title>S.Hub v7</title>
+    <title>S.Hub v10</title>
     <style>
-        :root { --bg: #030303; --card: #101010; --accent: #00ff95; --text: #f0f0f0; --border: #222; }
-        body { background: var(--bg); color: var(--text); font-family: -apple-system, sans-serif; margin: 0; padding: 0; }
-        #lock { position: fixed; top:0; left:0; width:100%; height:100%; background: var(--bg); z-index: 10000; display: flex; flex-direction: column; align-items: center; justify-content: center; }
-        .pin { background: #1a1a1a; border: 2px solid #333; color: var(--accent); font-size: 32px; text-align: center; width: 240px; padding: 15px; border-radius: 18px; letter-spacing: 5px; outline: none; margin-bottom: 20px; }
-        .btn-l { width: 240px; background: var(--accent); color: black; border: none; padding: 18px; border-radius: 18px; font-weight: bold; font-size: 18px; cursor: pointer; }
-        #hub-wrapper { display: none; padding: 20px; padding-bottom: 50px; }
-        .base-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
-        .btn-add { background: none; border: 1px solid var(--accent); color: var(--accent); padding: 8px 15px; border-radius: 10px; font-weight: bold; }
-        #add-form { display: none; background: var(--card); border-radius: 20px; padding: 15px; border: 1px solid var(--border); margin-bottom: 20px; }
-        input, textarea { width: 100%; background: #1a1a1a; border: 1px solid #333; color: white; padding: 15px; border-radius: 15px; margin-bottom: 10px; box-sizing: border-box; font-size: 16px; }
-        .btn-s { width: 100%; background: var(--accent); color: black; border: none; padding: 18px; border-radius: 15px; font-weight: bold; font-size: 18px; }
-        .card { background: var(--card); border-radius: 22px; padding: 18px; margin-bottom: 15px; border: 1px solid var(--border); position: relative; }
+        :root { --bg: #050505; --card: #111; --accent: #00ffa3; --text: #eee; --border: #222; }
+        body { background: var(--bg); color: var(--text); font-family: sans-serif; margin: 0; padding: 15px; user-select: text; -webkit-user-select: text; }
+        
+        /* ЭКРАН ВХОДА */
+        #lock { position: fixed; inset: 0; background: var(--bg); z-index: 10000; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+        .pin-input { background: #1a1a1a; border: 2px solid #333; color: var(--accent); font-size: 32px; text-align: center; width: 220px; padding: 15px; border-radius: 20px; margin-bottom: 20px; outline: none; letter-spacing: 4px; }
+        
+        /* ШАПКА */
+        header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; position: sticky; top: 0; background: var(--bg); z-index: 100; padding: 10px 0; border-bottom: 1px solid var(--border); }
+        .logo { font-size: 22px; font-weight: 900; color: var(--accent); }
+        .btn-icon { width: 42px; height: 42px; border-radius: 50%; border: 1px solid #333; background: #1a1a1a; color: var(--accent); display: flex; align-items: center; justify-content: center; font-size: 20px; cursor: pointer; }
+
+        /* ФОРМЫ */
+        #form-add, #form-search { background: var(--card); border-radius: 20px; padding: 15px; border: 1px solid var(--border); margin-bottom: 15px; display: none; }
+        input, textarea { width: 100%; background: #000; border: 1px solid #333; color: #fff; padding: 12px; border-radius: 12px; margin-bottom: 10px; box-sizing: border-box; font-size: 16px; outline: none; }
+        .btn-main { background: var(--accent); color: #000; border: none; padding: 16px; border-radius: 15px; font-weight: bold; width: 100%; font-size: 16px; cursor: pointer; }
+
+        /* ЗАМЕТКИ */
+        .card { background: var(--card); border-radius: 20px; padding: 18px; margin-bottom: 12px; border: 1px solid var(--border); }
         .card-h { display: flex; justify-content: space-between; align-items: center; cursor: pointer; }
-        .card-t { font-weight: bold; font-size: 19px; color: var(--accent); user-select: text !important; -webkit-user-select: text !important; margin: 0; flex: 1; }
-        .card-d { display: none; color: #ccc; font-size: 15px; line-height: 1.6; margin-top: 15px; white-space: pre-wrap; user-select: text !important; -webkit-user-select: text !important; border-top: 1px solid #222; padding-top: 10px; }
+        .card-t { font-weight: bold; font-size: 18px; color: var(--accent); flex: 1; }
+        .card-d { display: none; margin-top: 15px; color: #ccc; line-height: 1.6; white-space: pre-wrap; border-top: 1px solid #222; padding-top: 12px; user-select: text !important; -webkit-user-select: text !important; }
         .card-d.open { display: block; }
-        .btn-del { background: none; border: none; color: #ff4444; font-size: 12px; position: absolute; bottom: 15px; right: 18px; }
+        
+        .footer-card { display: flex; justify-content: space-between; margin-top: 15px; font-size: 11px; color: #444; }
+        .del-btn { color: #ff4444; font-weight: bold; }
     </style>
 </head>
 <body>
-    <div id="lock">
-        <h1 style="color: var(--accent); font-size: 26px;">SECURE ACCESS</h1>
-        <input type="password" id="pin" class="pin" inputmode="numeric" maxlength="8" placeholder="****">
-        <button class="btn-l" onclick="check()">ВОЙТИ</button>
-        <p id="err" style="color: #ff4444; margin-top: 15px; display: none;">Неверный код!</p>
-    </div>
-    <div id="hub-wrapper">
-        <div class="base-header">
-            <h1 style="margin:0;">S.Hub</h1>
-            <button class="btn-add" id="toggle-add-btn" onclick="toggleForm()">+ Добавить</button>
+
+<div id="lock">
+    <div style="color: #333; margin-bottom: 10px; font-size: 12px; letter-spacing: 2px;">PRIVATE ACCESS</div>
+    <input type="password" id="pass-field" class="pin-input" inputmode="numeric" maxlength="8" placeholder="••••">
+    <button onclick="login()" class="btn-main" style="width: 220px">ENTER</button>
+</div>
+
+<div id="app" style="display: none;">
+    <header>
+        <div class="logo">S.Hub</div>
+        <div style="display: flex; gap: 10px;">
+            <button class="btn-icon" onclick="toggleUI('form-search')">🔍</button>
+            <button class="btn-icon" onclick="toggleUI('form-add')">➕</button>
         </div>
-        <div id="add-form">
-            <input type="text" id="nt" placeholder="Название">
-            <textarea id="nd" rows="6" placeholder="Текст заметки..."></textarea>
-            <button class="btn-s" onclick="add()">СОХРАНИТЬ</button>
-        </div>
-        <div id="list"></div>
+    </header>
+
+    <div id="form-search">
+        <input type="text" id="search-input" placeholder="Введите для поиска..." oninput="render()">
     </div>
+
+    <div id="form-add">
+        <input type="text" id="nt" placeholder="Заголовок">
+        <textarea id="nd" rows="6" placeholder="Текст заметки..." oninput="updateStats(this.value)"></textarea>
+        <div style="font-size: 11px; color: #666; margin-bottom: 12px;">Символов: <span id="char-count">0</span></div>
+        <button class="btn-main" onclick="saveNote()">СОХРАНИТЬ</button>
+    </div>
+
+    <div id="list"></div>
+</div>
+
 <script>
-    const P = "12051205";
-    function check() {
-        if(document.getElementById('pin').value === P) {
-            document.getElementById('lock').style.display = 'none';
-            document.getElementById('hub-wrapper').style.display = 'block';
-            draw();
+    const PASSWORD = "12051205";
+    let database = JSON.parse(localStorage.getItem('sh_db_v10')) || [];
+
+    // Проверка активной сессии (чтобы не вводить пароль при каждом обновлении страницы в течение 30 мин)
+    if(sessionStorage.getItem('is_auth') === 'true') {
+        showApp();
+    }
+
+    function login() {
+        if(document.getElementById('pass-field').value === PASSWORD) {
+            sessionStorage.setItem('is_auth', 'true');
+            showApp();
         } else {
-            document.getElementById('err').style.display = 'block';
-            document.getElementById('pin').value = '';
+            alert("Ошибка доступа");
+            document.getElementById('pass-field').value = '';
         }
     }
-    let db = JSON.parse(localStorage.getItem('shub_v7')) || [];
-    function toggleForm() {
-        const f = document.getElementById('add-form');
-        f.style.display = f.style.display === 'block' ? 'none' : 'block';
+
+    function showApp() {
+        document.getElementById('lock').style.display = 'none';
+        document.getElementById('app').style.display = 'block';
+        render();
     }
-    function add() {
-        const t = document.getElementById('nt').value;
-        const d = document.getElementById('nd').value;
-        if(t && d) {
-            db.unshift({t, d});
-            localStorage.setItem('shub_v7', JSON.stringify(db));
-            location.reload();
-        }
+
+    function toggleUI(id) {
+        const el = document.getElementById(id);
+        el.style.display = el.style.display === 'block' ? 'none' : 'block';
     }
-    function toggleDesc(id) {
-        document.getElementById('d-' + id).classList.toggle('open');
+
+    function updateStats(val) {
+        document.getElementById('char-count').innerText = val.length;
     }
-    function draw() {
-        const list = document.getElementById('list');
-        list.innerHTML = db.map((n, i) => `
+
+    function saveNote() {
+        const title = document.getElementById('nt').value;
+        const text = document.getElementById('nd').value;
+        
+        if(!title || !text) return;
+
+        const newNote = {
+            title: title,
+            text: text,
+            id: Date.now()
+        };
+
+        database.unshift(newNote);
+        localStorage.setItem('sh_db_v10', JSON.stringify(database));
+
+        // Очищаем форму и скрываем её БЕЗ ПЕРЕЗАГРУЗКИ
+        document.getElementById('nt').value = '';
+        document.getElementById('nd').value = '';
+        document.getElementById('char-count').innerText = '0';
+        toggleUI('form-add');
+        
+        render();
+    }
+
+    function render() {
+        const query = document.getElementById('search-input').value.toLowerCase();
+        const listContainer = document.getElementById('list');
+        
+        const filtered = database.filter(note => 
+            note.title.toLowerCase().includes(query) || 
+            note.text.toLowerCase().includes(query)
+        );
+
+        listContainer.innerHTML = filtered.map(note => `
             <div class="card">
-                <div class="card-h" onclick="toggleDesc(${i})">
-                    <h2 class="card-t">${n.t}</h2>
-                    <span style="color:#555">👁️</span>
+                <div class="card-h" onclick="document.getElementById('d-${note.id}').classList.toggle('open')">
+                    <div class="card-t">${note.title}</div>
+                    <div style="color: #444; font-size: 12px;">▼</div>
                 </div>
-                <div class="card-d" id="d-${i}">${n.d}</div>
-                <button onclick="del(${i})" class="btn-del">✕</button>
+                <div class="card-d" id="d-${note.id}">${note.text}</div>
+                <div class="footer-card">
+                    <span>Символов: ${note.text.length}</span>
+                    <span class="del-btn" onclick="deleteNote(${note.id})">УДАЛИТЬ</span>
+                </div>
             </div>
         `).join('');
     }
-    function del(i) { if(confirm("Удалить?")) { db.splice(i,1); localStorage.setItem('shub_v7', JSON.stringify(db)); draw(); } }
+
+    function deleteNote(id) {
+        if(confirm("Удалить эту заметку?")) {
+            database = database.filter(n => n.id !== id);
+            localStorage.setItem('sh_db_v10', JSON.stringify(database));
+            render();
+        }
+    }
 </script>
 </body>
 </html>
