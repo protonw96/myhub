@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black">
+    <link rel="apple-touch-icon" href="https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExNHJndXljZ3R6Z3R6Z3R6Z3R6Z3R6Z3R6Z3R6Z3R6Z3R6JmVwPXYxX2ludGVybmFsX2dpZl9ieV9pZCZjdD1n/Ka07O2sKhUCp5tIjx7/giphy.gif">
+    <title>Private Hub</title>
+    <style>
+        :root { --bg: #050505; --card: #121212; --accent: #00ffa3; --text: #ffffff; }
+        body { background: var(--bg); color: var(--text); font-family: sans-serif; margin: 0; padding-bottom: 100px; }
+
+        /* ЭКРАН ПАРОЛЯ */
+        #lock-screen {
+            position: fixed; top:0; left:0; width:100%; height:100%;
+            background: var(--bg); z-index: 10000;
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+        }
+        .pin-input {
+            background: #1a1a1a; border: 2px solid #333; color: var(--accent);
+            font-size: 28px; text-align: center; width: 240px; padding: 15px;
+            border-radius: 15px; letter-spacing: 3px; margin-bottom: 20px; outline: none;
+        }
+
+        #main-wrapper { display: none; }
+        .page { display: none; padding: 20px; animation: fadeIn 0.3s ease; }
+        .page.active { display: block; }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+        .card { background: var(--card); border-radius: 20px; padding: 15px; margin-bottom: 15px; border: 1px solid #222; position: relative; }
+        input, textarea { width: 100%; background: #1a1a1a; border: 1px solid #333; color: white; padding: 15px; border-radius: 12px; margin-bottom: 10px; box-sizing: border-box; font-size: 16px; }
+        .btn-main { width: 100%; background: var(--accent); color: black; border: none; padding: 18px; border-radius: 15px; font-weight: bold; font-size: 18px; }
+
+        .nav { position: fixed; bottom: 0; width: 100%; height: 80px; background: rgba(10,10,10,0.95); backdrop-filter: blur(15px); display: flex; border-top: 1px solid #333; z-index: 1000; }
+        .nav-btn { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; color: #555; text-decoration: none; font-size: 11px; }
+        .nav-btn.active { color: var(--accent); }
+        .nav-icon { font-size: 24px; margin-bottom: 4px; }
+        
+        #toast { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); background: var(--accent); color: black; padding: 10px 25px; border-radius: 30px; font-weight: bold; display: none; z-index: 2000; }
+    </style>
+</head>
+<body>
+
+    <div id="lock-screen">
+        <h2 style="color: var(--accent)">PRIVATE ACCESS</h2>
+        <input type="password" id="pin" class="pin-input" inputmode="numeric" maxlength="8" placeholder="Код доступа">
+        <button class="btn-main" style="width: 240px" onclick="checkPin()">ВОЙТИ</button>
+        <p id="error" style="color: #ff4444; margin-top: 15px; display: none;">Неверный код!</p>
+    </div>
+
+    <div id="main-wrapper">
+        <div id="toast">Готово!</div>
+
+        <div id="p-base" class="page active">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px;">
+                <h1 style="margin:0">База</h1>
+                <button onclick="copyAll()" style="color:var(--accent); background:none; border:none; font-weight:bold;">Копировать всё</button>
+            </div>
+            <div id="list"></div>
+        </div>
+
+        <div id="p-info" class="page">
+            <h1>Инфо-Лист</h1>
+            <div class="card">
+                <textarea id="info-val" rows="18" placeholder="Любой текст здесь..." oninput="saveInfo()"></textarea>
+                <button class="btn-main" onclick="copyInfo()">Копировать текст</button>
+            </div>
+        </div>
+
+        <div id="p-new" class="page">
+            <h1>Новая запись</h1>
+            <div class="card">
+                <input type="text" id="nt" placeholder="Название">
+                <textarea id="nd" rows="6" placeholder="Текст заметки..."></textarea>
+                <button class="btn-main" onclick="add()">СОХРАНИТЬ</button>
+            </div>
+        </div>
+
+        <nav class="nav">
+            <div class="nav-btn active" onclick="go('base', this)"><span class="nav-icon">📁</span>База</div>
+            <div class="nav-btn" onclick="go('info', this)"><span class="nav-icon">📄</span>Инфо</div>
+            <div class="nav-btn" onclick="go('new', this)"><span class="nav-icon">➕</span>Добавить</div>
+        </nav>
+    </div>
+
+<script>
+    // ТВОЙ НОВЫЙ ПАРОЛЬ
+    const PASS = "12051205";
+
+    function checkPin() {
+        if(document.getElementById('pin').value === PASS) {
+            document.getElementById('lock-screen').style.display = 'none';
+            document.getElementById('main-wrapper').style.display = 'block';
+            draw();
+        } else {
+            document.getElementById('error').style.display = 'block';
+            document.getElementById('pin').value = '';
+        }
+    }
+
+    let db = JSON.parse(localStorage.getItem('gh_db')) || [];
+
+    function go(id, el) {
+        document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+        document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+        document.getElementById('p-' + id).classList.add('active');
+        el.classList.add('active');
+        window.scrollTo(0,0);
+    }
+
+    function copy(txt) {
+        navigator.clipboard.writeText(txt).then(() => {
+            const t = document.getElementById('toast');
+            t.style.display = 'block';
+            setTimeout(() => t.style.display = 'none', 1500);
+        });
+    }
+
+    function add() {
+        const t = document.getElementById('nt').value;
+        const d = document.getElementById('nd').value;
+        if(t && d) {
+            db.unshift({t, d});
+            localStorage.setItem('gh_db', JSON.stringify(db));
+            location.reload();
+        }
+    }
+
+    function draw() {
+        const list = document.getElementById('list');
+        list.innerHTML = db.length ? db.map((n, i) => `
+            <div class="card">
+                <div style="font-weight:bold; margin-bottom:8px; color:var(--accent); font-size:18px;">${n.t}</div>
+                <div style="color:#ccc; font-size:14px; margin-bottom:15px; white-space:pre-wrap;">${n.d}</div>
+                <div style="display:flex; gap:10px;">
+                   <button onclick="copy('${n.d.replace(/\n/g, ' ')}')" style="background:#222; color:var(--accent); border:none; padding:10px 15px; border-radius:10px; font-weight:bold;">Копировать</button>
+                   <button onclick="del(${i})" style="background:none; border:none; color:#555; margin-left:auto;">Удалить</button>
+                </div>
+            </div>
+        `).join('') : '<p style="text-align:center; color:#444;">Записей нет</p>';
+    }
+
+    function del(i) { if(confirm("Удалить?")) { db.splice(i,1); localStorage.setItem('gh_db', JSON.stringify(db)); draw(); } }
+    function saveInfo() { localStorage.setItem('gh_info', document.getElementById('info-val').value); }
+    function copyInfo() { copy(document.getElementById('info-val').value); }
+    function copyAll() { copy(db.map(n => n.t + ':\n' + n.d).join('\n\n')); }
+
+    document.getElementById('info-val').value = localStorage.getItem('gh_info') || "";
+</script>
+</body>
+</html>
