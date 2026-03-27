@@ -3,176 +3,159 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>S.Hub Premium</title>
+    <title>S.Hub v20</title>
     <style>
-        :root { --bg: #0a0a0b; --card: #161618; --accent: #00ffa3; --text: #ffffff; --dim: #8e8e93; }
-        
-        body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 0; overflow-x: hidden; }
+        :root { --bg: #000; --card: #0d0d0e; --accent: #00ffa3; --text: #ffffff; --dim: #444; }
+        body { background: var(--bg); color: var(--text); font-family: -apple-system, system-ui, sans-serif; margin: 0; padding: 0; overflow-x: hidden; }
 
+        /* ЭКРАН ЗАЩИТЫ */
+        #shield { position: fixed; inset: 0; background: #000; z-index: 30000; display: none; align-items: center; justify-content: center; font-weight: 900; color: #111; font-size: 40px; }
+        
         /* ВХОД */
-        #lock { position: fixed; inset: 0; background: radial-gradient(circle at center, #1a1a1c 0%, #0a0a0b 100%); z-index: 10000; display: flex; flex-direction: column; align-items: center; justify-content: center; transition: opacity 0.4s; }
-        .pin-input { background: rgba(255,255,255,0.05); border: 1px solid #333; color: var(--accent); font-size: 32px; text-align: center; width: 220px; padding: 18px; border-radius: 24px; margin-bottom: 25px; outline: none; letter-spacing: 8px; backdrop-filter: blur(10px); }
-        
-        /* ШАПКА */
-        header { padding: 20px; display: flex; justify-content: space-between; align-items: center; position: sticky; top: 0; background: rgba(10,10,11,0.8); backdrop-filter: blur(20px); z-index: 100; border-bottom: 1px solid rgba(255,255,255,0.05); }
-        .logo { font-size: 24px; font-weight: 800; background: linear-gradient(90deg, #00ffa3, #00d1ff); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+        #lock { position: fixed; inset: 0; background: #000; z-index: 10000; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+        .pin { background: #111; border: 1px solid #222; color: var(--accent); font-size: 32px; text-align: center; width: 180px; padding: 15px; border-radius: 20px; outline: none; letter-spacing: 5px; margin-bottom: 20px; }
 
-        /* КОНТЕНТ */
-        #app { display: none; padding: 15px; padding-bottom: 100px; }
-        
-        .search-wrap { margin-bottom: 20px; position: relative; }
-        .search-wrap input { width: 100%; background: var(--card); border: 1px solid #2c2c2e; color: white; padding: 15px 15px 15px 45px; border-radius: 18px; box-sizing: border-box; font-size: 16px; outline: none; }
-        .search-icon { position: absolute; left: 15px; top: 15px; color: var(--dim); }
+        header { padding: 15px 20px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #1a1a1a; position: sticky; top: 0; background: rgba(0,0,0,0.8); backdrop-filter: blur(15px); z-index: 100; }
+        .logo { font-size: 18px; font-weight: 900; color: var(--accent); letter-spacing: 2px; }
+        #app { display: none; padding: 15px; padding-bottom: 120px; animation: fadeIn 0.3s; }
+
+        /* ЖИВОЙ ПОИСК */
+        .search { background: var(--card); border-radius: 12px; padding: 12px; margin-bottom: 15px; border: 1px solid #222; display: flex; }
+        .search input { background: none; border: none; color: #fff; width: 100%; font-size: 16px; outline: none; }
 
         /* КАРТОЧКИ */
-        .card { background: var(--card); border-radius: 24px; padding: 20px; margin-bottom: 15px; border: 1px solid rgba(255,255,255,0.03); box-shadow: 0 4px 15px rgba(0,0,0,0.3); transition: transform 0.2s; }
-        .card:active { transform: scale(0.98); }
-        .card-h { display: flex; justify-content: space-between; align-items: center; cursor: pointer; }
-        .card-t { font-weight: 700; font-size: 18px; color: var(--text); flex: 1; }
-        .card-arrow { color: var(--dim); transition: 0.3s; }
+        .card { background: var(--card); border-radius: 18px; padding: 16px; margin-bottom: 12px; border: 1px solid #1a1a1a; position: relative; }
+        .card-h { cursor: pointer; display: flex; justify-content: space-between; align-items: center; }
+        .card-t { font-weight: 700; font-size: 16px; color: var(--text); }
+        .card-d { display: none; margin-top: 15px; color: #888; line-height: 1.6; white-space: pre-wrap; border-top: 1px solid #1a1a1a; padding-top: 12px; user-select: text; }
+        .card-d.open { display: block; }
+
+        .meta { display: flex; justify-content: space-between; margin-top: 15px; font-size: 10px; color: var(--dim); }
+        .del-btn { color: #ff3b30; font-weight: bold; }
+
+        .fab { position: fixed; bottom: 30px; right: 20px; width: 60px; height: 60px; background: var(--accent); border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 30px; color: #000; box-shadow: 0 0 20px rgba(0,255,163,0.3); z-index: 500; }
         
-        .card-d { max-height: 0; overflow: hidden; transition: max-height 0.4s ease-out, margin 0.3s; color: #a1a1a6; line-height: 1.6; font-size: 15px; white-space: pre-wrap; user-select: text !important; -webkit-user-select: text !important; }
-        .card-d.open { max-height: 2000px; margin-top: 15px; border-top: 1px solid #2c2c2e; padding-top: 15px; }
-
-        .footer-card { display: flex; justify-content: space-between; margin-top: 15px; font-size: 11px; color: var(--dim); font-weight: 500; }
-        .del-btn { color: #ff3b30; padding: 5px; }
-
-        /* ФОРМА ДОБАВЛЕНИЯ */
-        #form-add { position: fixed; bottom: 0; left: 0; right: 0; background: #1c1c1e; border-radius: 30px 30px 0 0; padding: 25px; transform: translateY(100%); transition: 0.4s cubic-bezier(0.4, 0, 0.2, 1); z-index: 1000; box-shadow: 0 -10px 30px rgba(0,0,0,0.5); }
-        #form-add.active { transform: translateY(0); }
-        #form-add textarea { width: 100%; background: #2c2c2e; border: none; color: white; padding: 15px; border-radius: 18px; font-size: 16px; margin-bottom: 10px; resize: none; box-sizing: border-box; outline: none; }
-        #form-add input { width: 100%; background: #2c2c2e; border: none; color: white; padding: 15px; border-radius: 18px; font-size: 16px; margin-bottom: 10px; box-sizing: border-box; outline: none; }
-
-        .btn-main { background: var(--accent); color: black; border: none; padding: 18px; border-radius: 20px; font-weight: 700; width: 100%; font-size: 16px; cursor: pointer; box-shadow: 0 4px 15px rgba(0,255,163,0.3); }
-
-        /* ПЛАВАЮЩАЯ КНОПКА */
-        .fab { position: fixed; bottom: 30px; right: 20px; width: 60px; height: 60px; background: var(--accent); border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 30px; color: black; box-shadow: 0 8px 25px rgba(0,255,163,0.4); z-index: 500; }
+        #form { position: fixed; bottom: 0; left: 0; right: 0; background: #0a0a0a; border-radius: 25px 25px 0 0; padding: 25px; transform: translateY(110%); transition: 0.4s cubic-bezier(0.18, 0.89, 0.32, 1.28); z-index: 1000; border-top: 1px solid #333; }
+        #form.active { transform: translateY(0); }
+        input, textarea { width: 100%; background: #000; border: 1px solid #222; color: #fff; padding: 15px; border-radius: 15px; margin-bottom: 10px; box-sizing: border-box; font-size: 16px; outline: none; }
+        .btn-m { background: var(--accent); color: #000; border: none; padding: 18px; border-radius: 20px; font-weight: 900; width: 100%; font-size: 16px; cursor: pointer; }
         
-        .overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); display: none; z-index: 999; backdrop-filter: blur(4px); }
+        .overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.8); display: none; z-index: 999; backdrop-filter: blur(5px); }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
     </style>
 </head>
 <body>
 
+<div id="shield">S.HUB</div>
+
 <div id="lock">
-    <div class="logo" style="margin-bottom: 40px; font-size: 32px;">S.Hub</div>
-    <input type="password" id="pass-field" class="pin-input" inputmode="numeric" maxlength="8" placeholder="••••">
-    <button onclick="login()" class="btn-main" style="width: 220px">ВОЙТИ</button>
+    <div class="logo" style="margin-bottom:30px">ENCRYPTED_CORE</div>
+    <input type="password" id="pass" class="pin" inputmode="numeric" maxlength="8" placeholder="••••">
+    <button onclick="auth()" class="btn-m" style="width: 180px">UNLOCK</button>
 </div>
 
 <div id="app">
     <header>
-        <div class="logo">S.Hub</div>
-        <div style="font-size: 12px; color: var(--dim);" id="status-mode">Secure Mode</div>
+        <div class="logo">S.HUB v20</div>
+        <div style="font-size: 10px; color: var(--dim)">SECURE_STORAGE</div>
     </header>
 
-    <div class="search-wrap">
-        <span class="search-icon">🔍</span>
-        <input type="text" id="search-input" placeholder="Поиск в базе..." oninput="render()">
-    </div>
-
+    <div class="search"><input type="text" id="q" placeholder="Живой поиск..." oninput="render()"></div>
     <div id="list"></div>
 </div>
 
-<div class="fab" onclick="toggleAdd(true)">+</div>
+<div class="fab" onclick="vibrate(30); toggleF(true)">+</div>
+<div class="overlay" id="overlay" onclick="toggleF(false)"></div>
 
-<div class="overlay" id="overlay" onclick="toggleAdd(false)"></div>
-
-<div id="form-add">
-    <div style="display:flex; justify-content: space-between; margin-bottom: 15px;">
-        <b style="font-size: 18px;">Новая запись</b>
-        <span onclick="toggleAdd(false)" style="color: var(--dim);">Закрыть</span>
-    </div>
-    <input type="text" id="nt" placeholder="Заголовок">
-    <textarea id="nd" rows="6" placeholder="Текст..." oninput="updateStats(this.value)"></textarea>
-    <div style="font-size: 12px; color: var(--dim); margin-bottom: 15px;">Символов: <span id="char-count" style="color: var(--accent)">0</span></div>
-    <button class="btn-main" onclick="saveNote()">СОХРАНИТЬ</button>
+<div id="form">
+    <input type="text" id="nt" placeholder="Название">
+    <textarea id="nd" rows="6" placeholder="Секретный текст..."></textarea>
+    <label style="display:block; margin-bottom:15px; font-size:12px; color:var(--dim)">
+        <input type="checkbox" id="auto_del"> Удалить через 1 час (Nuclear)
+    </label>
+    <button class="btn-m" onclick="vibrate(50); save()">СОХРАНИТЬ ЗАПИСЬ</button>
 </div>
 
 <script>
-    const PASSWORD = "12051205";
-    const PANIC_CODE = "0000"; 
-    const PANIC_CODE = "1111":
-    let database = JSON.parse(localStorage.getItem('sh_db_v11')) || [];
+    const KEY = "12051205", PANIC = "0000";
+    let db = JSON.parse(localStorage.getItem('sh_db_v20')) || [];
     let isPanic = false;
 
-    function login() {
-        const val = document.getElementById('pass-field').value;
-        if(val === PASSWORD) {
-            isPanic = false;
-            showApp();
-        } else if(val === PANIC_CODE) {
-            isPanic = true;
-            document.getElementById('status-mode').innerText = "Guest Mode";
-            showApp();
-        } else {
-            document.getElementById('pass-field').style.borderColor = "red";
-            setTimeout(() => document.getElementById('pass-field').style.borderColor = "#333", 500);
-        }
+    // Фейковые данные для режима "Двойное дно"
+    const decoy = [{t: "Список покупок", d: "Хлеб, молоко, яйца, яблоки.", id: 1}, {t: "Пароль от Wi-Fi", d: "Guest12345", id: 2}];
+
+    // Защита: Скрытие контента при выходе
+    document.addEventListener("visibilitychange", () => {
+        const s = document.getElementById('shield');
+        if (document.hidden) { s.style.display = 'flex'; } 
+        else { location.reload(); }
+    });
+
+    function vibrate(ms) { if(navigator.vibrate) navigator.vibrate(ms); }
+
+    function auth() {
+        const p = document.getElementById('pass').value;
+        vibrate(20);
+        if(p === KEY) { isPanic = false; start(); }
+        else if(p === PANIC) { isPanic = true; start(); }
+        else { document.getElementById('pass').value = ''; vibrate([50, 50, 50]); }
     }
 
-    function showApp() {
-        document.getElementById('lock').style.opacity = '0';
-        setTimeout(() => {
-            document.getElementById('lock').style.display = 'none';
-            document.getElementById('app').style.display = 'block';
-            render();
-        }, 400);
-    }
-
-    function toggleAdd(show) {
-        document.getElementById('form-add').classList.toggle('active', show);
-        document.getElementById('overlay').style.display = show ? 'block' : 'none';
-    }
-
-    function updateStats(val) { document.getElementById('char-count').innerText = val.length; }
-
-    function saveNote() {
-        const title = document.getElementById('nt').value;
-        const text = document.getElementById('nd').value;
-        if(!title || !text || isPanic) return;
-
-        database.unshift({ title, text, id: Date.now() });
-        localStorage.setItem('sh_db_v11', JSON.stringify(database));
-        
-        document.getElementById('nt').value = '';
-        document.getElementById('nd').value = '';
-        toggleAdd(false);
+    function start() {
+        document.getElementById('lock').style.display = 'none';
+        document.getElementById('app').style.display = 'block';
         render();
     }
 
-    function render() {
-        const query = document.getElementById('search-input').value.toLowerCase();
-        const listContainer = document.getElementById('list');
-        const source = isPanic ? [] : database;
+    function toggleF(s) {
+        document.getElementById('form').classList.toggle('active', s);
+        document.getElementById('overlay').style.display = s ? 'block' : 'none';
+    }
+
+    function save() {
+        const t = document.getElementById('nt').value, d = document.getElementById('nd').value;
+        const autoDel = document.getElementById('auto_del').checked;
+        if(!t || !d || isPanic) return;
         
-        listContainer.innerHTML = source
-            .filter(n => n.title.toLowerCase().includes(query) || n.text.toLowerCase().includes(query))
-            .map(n => `
-                <div class="card">
-                    <div class="card-h" onclick="toggleCard(${n.id})">
-                        <div class="card-t">${n.title}</div>
-                        <div class="card-arrow" id="a-${n.id}">▼</div>
-                    </div>
-                    <div class="card-d" id="d-${n.id}">${n.text}</div>
-                    <div class="footer-card">
-                        <span>${n.text.length} знаков</span>
-                        <span class="del-btn" onclick="deleteNote(${n.id})">Удалить</span>
-                    </div>
+        const expire = autoDel ? Date.now() + 3600000 : null;
+        db.unshift({ t, d, expire, id: Date.now() });
+        localStorage.setItem('sh_db_v20', JSON.stringify(db));
+        
+        document.getElementById('nt').value = ''; document.getElementById('nd').value = '';
+        document.getElementById('auto_del').checked = false;
+        toggleF(false); render();
+    }
+
+    function render() {
+        // Очистка просроченных заметок
+        const now = Date.now();
+        db = db.filter(n => !n.expire || n.expire > now);
+        localStorage.setItem('sh_db_v20', JSON.stringify(db));
+
+        const q = document.getElementById('q').value.toLowerCase();
+        const list = document.getElementById('list');
+        const source = isPanic ? decoy : db;
+        
+        list.innerHTML = source.filter(n => n.t.toLowerCase().includes(q) || n.d.toLowerCase().includes(q)).map(n => `
+            <div class="card">
+                <div class="card-h" onclick="vibrate(10); document.getElementById('d-${n.id}').classList.toggle('open')">
+                    <div class="card-t">${n.t}</div>
+                    <div style="color:var(--accent); font-size:10px">${n.expire ? '⏳' : ''}</div>
                 </div>
-            `).join('');
+                <div class="card-d" id="d-${n.id}">${n.d}</div>
+                <div class="meta">
+                    <span>${n.d.length} символов</span>
+                    <span class="del-btn" onclick="del(${n.id})">УДАЛИТЬ</span>
+                </div>
+            </div>
+        `).join('');
     }
 
-    function toggleCard(id) {
-        const el = document.getElementById('d-'+id);
-        const arrow = document.getElementById('a-'+id);
-        const isOpen = el.classList.toggle('open');
-        arrow.style.transform = isOpen ? 'rotate(180deg)' : 'rotate(0deg)';
-    }
-
-    function deleteNote(id) {
-        if(confirm("Удалить запись?")) {
-            database = database.filter(n => n.id !== id);
-            localStorage.setItem('sh_db_v11', JSON.stringify(database));
+    function del(id) {
+        vibrate(100);
+        if(confirm("Удалить навсегда?")) {
+            db = db.filter(n => n.id != id);
+            localStorage.setItem('sh_db_v20', JSON.stringify(db));
             render();
         }
     }
