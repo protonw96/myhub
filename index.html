@@ -2,75 +2,163 @@
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <title>GitHub Banner Generator</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>S.Hub v20</title>
     <style>
-        body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; background: #f4f4f9; padding: 20px; }
-        canvas { border: 1px solid #ccc; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); max-width: 100%; }
-        .controls { margin-top: 20px; display: grid; gap: 10px; background: white; padding: 20px; border-radius: 8px; width: 400px; }
-        input, select, button { padding: 10px; border: 1px solid #ddd; border-radius: 5px; font-size: 16px; }
-        button { background: #238636; color: white; cursor: pointer; border: none; font-weight: bold; }
-        button:hover { background: #2ea043; }
+        :root { --bg: #000; --card: #0d0d0e; --accent: #00ffa3; --text: #ffffff; --dim: #444; }
+        body { background: var(--bg); color: var(--text); font-family: -apple-system, system-ui, sans-serif; margin: 0; padding: 0; overflow-x: hidden; }
+
+        /* ЭКРАН ЗАЩИТЫ */
+        #shield { position: fixed; inset: 0; background: #000; z-index: 30000; display: none; align-items: center; justify-content: center; font-weight: 900; color: #111; font-size: 40px; }
+        
+        /* ВХОД */
+        #lock { position: fixed; inset: 0; background: #000; z-index: 10000; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+        .pin { background: #111; border: 1px solid #222; color: var(--accent); font-size: 32px; text-align: center; width: 180px; padding: 15px; border-radius: 20px; outline: none; letter-spacing: 5px; margin-bottom: 20px; }
+
+        header { padding: 15px 20px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #1a1a1a; position: sticky; top: 0; background: rgba(0,0,0,0.8); backdrop-filter: blur(15px); z-index: 100; }
+        .logo { font-size: 18px; font-weight: 900; color: var(--accent); letter-spacing: 2px; }
+        #app { display: none; padding: 15px; padding-bottom: 120px; animation: fadeIn 0.3s; }
+
+        /* ЖИВОЙ ПОИСК */
+        .search { background: var(--card); border-radius: 12px; padding: 12px; margin-bottom: 15px; border: 1px solid #222; display: flex; }
+        .search input { background: none; border: none; color: #fff; width: 100%; font-size: 16px; outline: none; }
+
+        /* КАРТОЧКИ */
+        .card { background: var(--card); border-radius: 18px; padding: 16px; margin-bottom: 12px; border: 1px solid #1a1a1a; position: relative; }
+        .card-h { cursor: pointer; display: flex; justify-content: space-between; align-items: center; }
+        .card-t { font-weight: 700; font-size: 16px; color: var(--text); }
+        .card-d { display: none; margin-top: 15px; color: #888; line-height: 1.6; white-space: pre-wrap; border-top: 1px solid #1a1a1a; padding-top: 12px; user-select: text; }
+        .card-d.open { display: block; }
+
+        .meta { display: flex; justify-content: space-between; margin-top: 15px; font-size: 10px; color: var(--dim); }
+        .del-btn { color: #ff3b30; font-weight: bold; }
+
+        .fab { position: fixed; bottom: 30px; right: 20px; width: 60px; height: 60px; background: var(--accent); border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 30px; color: #000; box-shadow: 0 0 20px rgba(0,255,163,0.3); z-index: 500; }
+        
+        #form { position: fixed; bottom: 0; left: 0; right: 0; background: #0a0a0a; border-radius: 25px 25px 0 0; padding: 25px; transform: translateY(110%); transition: 0.4s cubic-bezier(0.18, 0.89, 0.32, 1.28); z-index: 1000; border-top: 1px solid #333; }
+        #form.active { transform: translateY(0); }
+        input, textarea { width: 100%; background: #000; border: 1px solid #222; color: #fff; padding: 15px; border-radius: 15px; margin-bottom: 10px; box-sizing: border-box; font-size: 16px; outline: none; }
+        .btn-m { background: var(--accent); color: #000; border: none; padding: 18px; border-radius: 20px; font-weight: 900; width: 100%; font-size: 16px; cursor: pointer; }
+        
+        .overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.8); display: none; z-index: 999; backdrop-filter: blur(5px); }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
     </style>
 </head>
 <body>
 
-    <h2>🎨 Генератор обложек для GitHub</h2>
-    
-    <canvas id="bannerCanvas" width="1280" height="640"></canvas>
+<div id="shield">S.HUB</div>
 
-    <div class="controls">
-        <input type="text" id="repoName" placeholder="Название проекта" value="My Useful Project">
-        <input type="text" id="repoDesc" placeholder="Краткое описание" value="Крутой мессенджер на GitHub Pages">
-        <label>Цвет фона:</label>
-        <input type="color" id="bgColor" value="#0d1117">
-        <label>Цвет текста:</label>
-        <input type="color" id="textColor" value="#58a6ff">
-        <button onclick="downloadBanner()">Скачать баннер (.png)</button>
-    </div>
+<div id="lock">
+    <div class="logo" style="margin-bottom:30px">ENCRYPTED_CORE</div>
+    <input type="password" id="pass" class="pin" inputmode="numeric" maxlength="8" placeholder="••••">
+    <button onclick="auth()" class="btn-m" style="width: 180px">UNLOCK</button>
+</div>
 
-    <script>
-        const canvas = document.getElementById('bannerCanvas');
-        const ctx = canvas.getContext('2d');
+<div id="app">
+    <header>
+        <div class="logo">S.HUB v20</div>
+        <div style="font-size: 10px; color: var(--dim)">SECURE_STORAGE</div>
+    </header>
 
-        function draw() {
-            const name = document.getElementById('repoName').value;
-            const desc = document.getElementById('repoDesc').value;
-            const bg = document.getElementById('bgColor').value;
-            const textCol = document.getElementById('textColor').value;
+    <div class="search"><input type="text" id="q" placeholder="Живой поиск..." oninput="render()"></div>
+    <div id="list"></div>
+</div>
 
-            // Рисуем фон
-            ctx.fillStyle = bg;
-            ctx.fillRect(0, 0, canvas.width, canvas.height);
+<div class="fab" onclick="vibrate(30); toggleF(true)">+</div>
+<div class="overlay" id="overlay" onclick="toggleF(false)"></div>
 
-            // Настройка текста для заголовка
-            ctx.fillStyle = textCol;
-            ctx.font = "bold 80px sans-serif";
-            ctx.textAlign = "center";
-            ctx.fillText(name, canvas.width / 2, canvas.height / 2 - 20);
+<div id="form">
+    <input type="text" id="nt" placeholder="Название">
+    <textarea id="nd" rows="6" placeholder="Секретный текст..."></textarea>
+    <label style="display:block; margin-bottom:15px; font-size:12px; color:var(--dim)">
+        <input type="checkbox" id="auto_del"> Удалить через 1 час (Nuclear)
+    </label>
+    <button class="btn-m" onclick="vibrate(50); save()">СОХРАНИТЬ ЗАПИСЬ</button>
+</div>
 
-            // Настройка текста для описания
-            ctx.fillStyle = "#8b949e"; // Серый подзаголовок
-            ctx.font = "40px sans-serif";
-            ctx.fillText(desc, canvas.width / 2, canvas.height / 2 + 60);
+<script>
+    const KEY = "12051205", PANIC = "0000";
+    let db = JSON.parse(localStorage.getItem('sh_db_v20')) || [];
+    let isPanic = false;
 
-            // Рисуем декоративную полоску снизу
-            ctx.fillStyle = textCol;
-            ctx.fillRect(canvas.width/2 - 100, canvas.height/2 + 120, 200, 8);
+    // Фейковые данные для режима "Двойное дно"
+    const decoy = [{t: "Список покупок", d: "Хлеб, молоко, яйца, яблоки.", id: 1}, {t: "Пароль от Wi-Fi", d: "Guest12345", id: 2}];
+
+    // Защита: Скрытие контента при выходе
+    document.addEventListener("visibilitychange", () => {
+        const s = document.getElementById('shield');
+        if (document.hidden) { s.style.display = 'flex'; } 
+        else { location.reload(); }
+    });
+
+    function vibrate(ms) { if(navigator.vibrate) navigator.vibrate(ms); }
+
+    function auth() {
+        const p = document.getElementById('pass').value;
+        vibrate(20);
+        if(p === KEY) { isPanic = false; start(); }
+        else if(p === PANIC) { isPanic = true; start(); }
+        else { document.getElementById('pass').value = ''; vibrate([50, 50, 50]); }
+    }
+
+    function start() {
+        document.getElementById('lock').style.display = 'none';
+        document.getElementById('app').style.display = 'block';
+        render();
+    }
+
+    function toggleF(s) {
+        document.getElementById('form').classList.toggle('active', s);
+        document.getElementById('overlay').style.display = s ? 'block' : 'none';
+    }
+
+    function save() {
+        const t = document.getElementById('nt').value, d = document.getElementById('nd').value;
+        const autoDel = document.getElementById('auto_del').checked;
+        if(!t || !d || isPanic) return;
+        
+        const expire = autoDel ? Date.now() + 3600000 : null;
+        db.unshift({ t, d, expire, id: Date.now() });
+        localStorage.setItem('sh_db_v20', JSON.stringify(db));
+        
+        document.getElementById('nt').value = ''; document.getElementById('nd').value = '';
+        document.getElementById('auto_del').checked = false;
+        toggleF(false); render();
+    }
+
+    function render() {
+        // Очистка просроченных заметок
+        const now = Date.now();
+        db = db.filter(n => !n.expire || n.expire > now);
+        localStorage.setItem('sh_db_v20', JSON.stringify(db));
+
+        const q = document.getElementById('q').value.toLowerCase();
+        const list = document.getElementById('list');
+        const source = isPanic ? decoy : db;
+        
+        list.innerHTML = source.filter(n => n.t.toLowerCase().includes(q) || n.d.toLowerCase().includes(q)).map(n => `
+            <div class="card">
+                <div class="card-h" onclick="vibrate(10); document.getElementById('d-${n.id}').classList.toggle('open')">
+                    <div class="card-t">${n.t}</div>
+                    <div style="color:var(--accent); font-size:10px">${n.expire ? '⏳' : ''}</div>
+                </div>
+                <div class="card-d" id="d-${n.id}">${n.d}</div>
+                <div class="meta">
+                    <span>${n.d.length} символов</span>
+                    <span class="del-btn" onclick="del(${n.id})">УДАЛИТЬ</span>
+                </div>
+            </div>
+        `).join('');
+    }
+
+    function del(id) {
+        vibrate(100);
+        if(confirm("Удалить навсегда?")) {
+            db = db.filter(n => n.id != id);
+            localStorage.setItem('sh_db_v20', JSON.stringify(db));
+            render();
         }
-
-        // Обновляем при вводе
-        document.querySelectorAll('input').forEach(el => el.addEventListener('input', draw));
-
-        // Функция скачивания
-        function downloadBanner() {
-            const link = document.createElement('a');
-            link.download = 'github-banner.png';
-            link.href = canvas.toDataURL();
-            link.click();
-        }
-
-        // Первый запуск
-        draw();
-    </script>
+    }
+</script>
 </body>
 </html>
