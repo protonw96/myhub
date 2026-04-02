@@ -1,0 +1,16 @@
+body, html {
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    background: #1a1a1a;
+    width: 100%;
+    height: 100%;
+}
+
+canvas {
+    display: block;
+    width: 100vw;
+    height: 100vh;
+    touch-action: none; /* Важно для мобилок: отключает зум и скролл */
+}
+
