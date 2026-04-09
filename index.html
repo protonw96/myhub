@@ -13,15 +13,15 @@ GOLD = (255, 215, 0)
 pygame.init()
 pygame.mixer.init()
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
-pygame.display.set_caption("Space Battle: Auto-Fire")
+pygame.display.set_caption("Space Battle: Full Auto Mode")
 clock = pygame.time.Clock()
 
-# Пути
+# Пути к папкам
 BASE_DIR = os.path.dirname(__file__)
 IMG_DIR = os.path.join(BASE_DIR, 'assets', 'img')
 SND_DIR = os.path.join(BASE_DIR, 'assets', 'snd')
 
-# --- ЗАГРУЗКА ---
+# --- ФУНКЦИИ ЗАГРУЗКИ ---
 def load_img(name, alpha=True):
     path = os.path.join(IMG_DIR, name)
     try:
@@ -53,17 +53,17 @@ class Player(pygame.sprite.Sprite):
         self.rect = self.image.get_rect(centerx=WIDTH//2, bottom=HEIGHT-10)
         self.radius = 20
         self.last_shot = pygame.time.get_ticks()
-        self.shoot_delay = 200 # Скорость автоматической стрельбы (мс)
+        self.shoot_delay = 150 # Скорость авто-стрельбы (чем меньше, тем быстрее)
 
     def update(self):
-        # Движение
+        # Только движение (стрелки или A/D)
         keys = pygame.key.get_pressed()
         if keys[pygame.K_LEFT] or keys[pygame.K_a]: self.rect.x -= 8
         if keys[pygame.K_RIGHT] or keys[pygame.K_d]: self.rect.x += 8
         self.rect.clamp_ip(screen.get_rect())
 
-    def shoot(self, sprites, bullets):
-        # Логика автоматической очереди
+    def auto_shoot(self, sprites, bullets):
+        # Метод стрельбы без проверки кнопок
         now = pygame.time.get_ticks()
         if now - self.last_shot > self.shoot_delay:
             self.last_shot = now
@@ -81,6 +81,7 @@ class Meteor(pygame.sprite.Sprite):
         self.image = self.image_orig.copy()
         self.rect = self.image.get_rect()
         self.radius = int(self.rect.width * 0.8 / 2)
+        # Скорость зависит от уровня
         self.speedy = random.randint(2 + level, 5 + level * 2)
         self.spawn()
 
@@ -122,7 +123,7 @@ def select_level_mouse():
             if button_rect.collidepoint(mouse_pos):
                 color = GOLD
                 if mouse_click[0]:
-                    pygame.time.wait(200) # Задержка, чтобы не выстрелить сразу
+                    pygame.time.wait(200)
                     return i + 1
             
             draw_text(screen, text, 30, WIDTH//2, y_pos, color)
@@ -143,6 +144,7 @@ def main():
         player = Player()
         all_sprites.add(player)
         
+        # Количество врагов
         for _ in range(5 + level * 2):
             m = Meteor(level)
             all_sprites.add(m)
@@ -153,18 +155,13 @@ def main():
         while running:
             clock.tick(FPS)
             
-            # 1. Проверка событий
             for event in pygame.event.get():
                 if event.type == pygame.QUIT: pygame.quit(); sys.exit()
 
-            # 2. АВТОМАТИЧЕСКАЯ СТРЕЛЬБА
-            keys = pygame.key.get_pressed()
-            mouse_buttons = pygame.mouse.get_pressed()
-            # Если зажат Пробел ИЛИ Левая кнопка мыши
-            if keys[pygame.K_SPACE] or mouse_buttons[0]:
-                player.shoot(all_sprites, bullets)
+            # --- ВОТ ТУТ ОН СТРЕЛЯЕТ САМ ---
+            player.auto_shoot(all_sprites, bullets)
 
-            # 3. Обновление
+            # Обновление всех объектов
             all_sprites.update()
             
             # Коллизии
@@ -180,7 +177,7 @@ def main():
             if pygame.sprite.spritecollide(player, mobs, False, pygame.sprite.collide_circle):
                 running = False 
 
-            # 4. Отрисовка
+            # Отрисовка
             screen.blit(BG_IMG, (0, 0))
             all_sprites.draw(screen)
             draw_text(screen, f"Score: {score}", 20, 70, 10)
@@ -191,7 +188,7 @@ def main():
         screen.blit(BG_IMG, (0, 0))
         draw_text(screen, "GAME OVER", 60, WIDTH//2, HEIGHT//3)
         draw_text(screen, f"SCORE: {score}", 30, WIDTH//2, HEIGHT//2)
-        draw_text(screen, "Click to restart", 25, WIDTH//2, HEIGHT*0.8)
+        draw_text(screen, "Click to Menu", 25, WIDTH//2, HEIGHT*0.8)
         pygame.display.flip()
         
         pygame.time.wait(1000)
