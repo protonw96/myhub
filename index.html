@@ -3,27 +3,25 @@ import random
 import os
 import sys
 
-# --- ИНИЦИАЛИЗАЦИЯ ---
-pygame.init()
-pygame.mixer.init()
-
+# --- НАСТРОЙКИ ---
 WIDTH, HEIGHT = 480, 600
 FPS = 60
 WHITE = (255, 255, 255)
 BLACK = (0, 0, 0)
 GOLD = (255, 215, 0)
-GRAY = (100, 100, 100)
 
+pygame.init()
+pygame.mixer.init()
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
-pygame.display.set_caption("Space Battle: Mouse Select")
+pygame.display.set_caption("Space Battle: Auto-Fire")
 clock = pygame.time.Clock()
 
-# Пути к папкам
+# Пути
 BASE_DIR = os.path.dirname(__file__)
 IMG_DIR = os.path.join(BASE_DIR, 'assets', 'img')
 SND_DIR = os.path.join(BASE_DIR, 'assets', 'snd')
 
-# --- ЗАГРУЗКА РЕСУРСОВ ---
+# --- ЗАГРУЗКА ---
 def load_img(name, alpha=True):
     path = os.path.join(IMG_DIR, name)
     try:
@@ -40,14 +38,13 @@ LASER_IMG = load_img('laser.png')
 SHOOT_SND = os.path.join(SND_DIR, 'pew.wav')
 EXPL_SND = os.path.join(SND_DIR, 'expl.wav')
 
-# --- КЛАССЫ ИГРЫ ---
+# --- КЛАССЫ ---
 
 def draw_text(surf, text, size, x, y, color=WHITE):
     font = pygame.font.SysFont("arial", size, bold=True)
     txt = font.render(text, True, color)
     rect = txt.get_rect(midtop=(x, y))
     surf.blit(txt, rect)
-    return rect # Возвращаем прямоугольник текста для проверки кликов
 
 class Player(pygame.sprite.Sprite):
     def __init__(self):
@@ -55,19 +52,26 @@ class Player(pygame.sprite.Sprite):
         self.image = pygame.transform.scale(PLAYER_IMG, (50, 38))
         self.rect = self.image.get_rect(centerx=WIDTH//2, bottom=HEIGHT-10)
         self.radius = 20
+        self.last_shot = pygame.time.get_ticks()
+        self.shoot_delay = 200 # Скорость автоматической стрельбы (мс)
 
     def update(self):
+        # Движение
         keys = pygame.key.get_pressed()
         if keys[pygame.K_LEFT] or keys[pygame.K_a]: self.rect.x -= 8
         if keys[pygame.K_RIGHT] or keys[pygame.K_d]: self.rect.x += 8
         self.rect.clamp_ip(screen.get_rect())
 
     def shoot(self, sprites, bullets):
-        b = Bullet(self.rect.centerx, self.rect.top)
-        sprites.add(b)
-        bullets.add(b)
-        try: pygame.mixer.Sound(SHOOT_SND).play()
-        except: pass
+        # Логика автоматической очереди
+        now = pygame.time.get_ticks()
+        if now - self.last_shot > self.shoot_delay:
+            self.last_shot = now
+            b = Bullet(self.rect.centerx, self.rect.top)
+            sprites.add(b)
+            bullets.add(b)
+            try: pygame.mixer.Sound(SHOOT_SND).play()
+            except: pass
 
 class Meteor(pygame.sprite.Sprite):
     def __init__(self, level):
@@ -101,9 +105,7 @@ class Bullet(pygame.sprite.Sprite):
 # --- МЕНЮ С МЫШКОЙ ---
 
 def select_level_mouse():
-    """Меню выбора уровня с помощью мыши."""
     levels = ["1 - EASY", "2 - NORMAL", "3 - HARD", "4 - INSANE", "5 - NIGHTMARE"]
-    
     while True:
         screen.blit(BG_IMG, (0, 0))
         draw_text(screen, "SPACE BATTLE", 50, WIDTH//2, 50)
@@ -112,27 +114,22 @@ def select_level_mouse():
         mouse_pos = pygame.mouse.get_pos()
         mouse_click = pygame.mouse.get_pressed()
         
-        # Рисуем кнопки и проверяем наведение
         for i, text in enumerate(levels):
             y_pos = 200 + (i * 60)
             color = WHITE
-            
-            # Создаем временный rect для проверки наведения мыши
-            # Ширина 200, высота 40 для области клика
             button_rect = pygame.Rect(WIDTH//2 - 100, y_pos, 200, 40)
             
             if button_rect.collidepoint(mouse_pos):
-                color = GOLD # Подсветка при наведении
-                if mouse_click[0]: # Если нажата левая кнопка мыши
+                color = GOLD
+                if mouse_click[0]:
+                    pygame.time.wait(200) # Задержка, чтобы не выстрелить сразу
                     return i + 1
             
             draw_text(screen, text, 30, WIDTH//2, y_pos, color)
         
         pygame.display.flip()
-        
         for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                pygame.quit(); sys.exit()
+            if event.type == pygame.QUIT: pygame.quit(); sys.exit()
 
 # --- ГЛАВНЫЙ ЦИКЛ ---
 
@@ -155,14 +152,22 @@ def main():
         running = True
         while running:
             clock.tick(FPS)
+            
+            # 1. Проверка событий
             for event in pygame.event.get():
                 if event.type == pygame.QUIT: pygame.quit(); sys.exit()
-                if event.type == pygame.KEYDOWN:
-                    if event.key == pygame.K_SPACE: player.shoot(all_sprites, bullets)
 
+            # 2. АВТОМАТИЧЕСКАЯ СТРЕЛЬБА
+            keys = pygame.key.get_pressed()
+            mouse_buttons = pygame.mouse.get_pressed()
+            # Если зажат Пробел ИЛИ Левая кнопка мыши
+            if keys[pygame.K_SPACE] or mouse_buttons[0]:
+                player.shoot(all_sprites, bullets)
+
+            # 3. Обновление
             all_sprites.update()
             
-            # Проверка коллизий
+            # Коллизии
             hits = pygame.sprite.groupcollide(mobs, bullets, True, True)
             for h in hits:
                 score += 10
@@ -175,19 +180,21 @@ def main():
             if pygame.sprite.spritecollide(player, mobs, False, pygame.sprite.collide_circle):
                 running = False 
 
+            # 4. Отрисовка
             screen.blit(BG_IMG, (0, 0))
             all_sprites.draw(screen)
             draw_text(screen, f"Score: {score}", 20, 70, 10)
             draw_text(screen, f"Lvl: {level}", 20, WIDTH-50, 10, GOLD)
             pygame.display.flip()
 
-        # Простой Game Over
+        # Game Over
         screen.blit(BG_IMG, (0, 0))
         draw_text(screen, "GAME OVER", 60, WIDTH//2, HEIGHT//3)
-        draw_text(screen, "Click to restart", 25, WIDTH//2, HEIGHT//2)
+        draw_text(screen, f"SCORE: {score}", 30, WIDTH//2, HEIGHT//2)
+        draw_text(screen, "Click to restart", 25, WIDTH//2, HEIGHT*0.8)
         pygame.display.flip()
-        pygame.time.wait(1000)
         
+        pygame.time.wait(1000)
         wait = True
         while wait:
             for e in pygame.event.get():
