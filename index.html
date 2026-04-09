@@ -1,12 +1,13 @@
 import pygame
 import random
-import requests
 import os
 import sys
-from io import BytesIO
 
-# Центрирование окна для ПК
-os.environ['SDL_VIDEO_CENTERED'] = '1'
+# --- НАСТРОЙКИ ПУТЕЙ ---
+game_dir = os.path.dirname(__file__)
+assets_dir = os.path.join(game_dir, 'assets')
+img_dir = os.path.join(assets_dir, 'img')
+snd_dir = os.path.join(assets_dir, 'snd')
 
 # --- КОНФИГУРАЦИЯ ---
 WIDTH = 480
@@ -16,37 +17,54 @@ METEOR_COUNT = 8
 WHITE = (255, 255, 255)
 BLACK = (0, 0, 0)
 
-RESOURCE_HUB = {
-    "background": "https://raw.githubusercontent.com/kidscancode/pygame_tutorials/master/shmup/img/starfield.png",
-    "player_ship": "https://raw.githubusercontent.com/kidscancode/pygame_tutorials/master/shmup/img/playerShip1_orange.png",
-    "meteor": "https://raw.githubusercontent.com/kidscancode/pygame_tutorials/master/shmup/img/meteorBrown_med1.png",
-    "laser": "https://raw.githubusercontent.com/kidscancode/pygame_tutorials/master/shmup/img/laserRed16.png",
-    "snd_shoot": "https://raw.githubusercontent.com/kidscancode/pygame_tutorials/master/shmup/snd/pew.wav",
-    "snd_expl": "https://raw.githubusercontent.com/kidscancode/pygame_tutorials/master/shmup/snd/expl3.wav",
-    "music": "https://raw.githubusercontent.com/kidscancode/pygame_tutorials/master/shmup/snd/tgfcoder-FrozenJam-SeamlessLoop.ogg"
-}
+# Центрирование окна
+os.environ['SDL_VIDEO_CENTERED'] = '1'
 
-def fetch_asset(url, is_image=True):
-    """Загрузка ресурсов из сети."""
-    try:
-        response = requests.get(url, timeout=10)
-        content = BytesIO(response.content)
-        if is_image:
-            return pygame.image.load(content).convert_alpha()
-        else:
-            return pygame.mixer.Sound(content)
-    except:
-        surf = pygame.Surface((30, 30))
-        surf.fill((255, 0, 0))
-        return surf if is_image else None
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 
 def draw_text(surf, text, size, x, y):
+    """Функция для отрисовки текста на экране."""
     font = pygame.font.SysFont("arial", size, bold=True)
     text_surface = font.render(text, True, WHITE)
     text_rect = text_surface.get_rect(midtop=(x, y))
     surf.blit(text_surface, text_rect)
 
-# --- КЛАССЫ ---
+def show_menu(screen, bg_img):
+    """Экран начального меню."""
+    screen.blit(bg_img, (0, 0))
+    draw_text(screen, "SPACE BATTLE", 48, WIDTH // 2, HEIGHT / 4)
+    draw_text(screen, "Arrows or AD to move", 22, WIDTH // 2, HEIGHT / 2)
+    draw_text(screen, "Press any key to Start", 26, WIDTH // 2, HEIGHT * 0.7)
+    pygame.display.flip()
+    
+    waiting = True
+    while waiting:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit()
+                sys.exit()
+            if event.type == pygame.KEYDOWN:
+                waiting = False
+
+def show_go_screen(screen, bg_img, score):
+    """Экран Game Over с результатом."""
+    screen.blit(bg_img, (0, 0))
+    draw_text(screen, "GAME OVER", 64, WIDTH // 2, HEIGHT / 4)
+    draw_text(screen, f"FINAL SCORE: {score}", 36, WIDTH // 2, HEIGHT / 2)
+    draw_text(screen, "Press any key to restart", 22, WIDTH // 2, HEIGHT * 0.75)
+    pygame.display.flip()
+    
+    pygame.time.wait(500) # Короткая пауза, чтобы случайно не пропустить экран
+    waiting = True
+    while waiting:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit()
+                sys.exit()
+            if event.type == pygame.KEYDOWN:
+                waiting = False
+
+# --- КЛАССЫ ОБЪЕКТОВ ---
 
 class Player(pygame.sprite.Sprite):
     def __init__(self, img):
@@ -54,20 +72,15 @@ class Player(pygame.sprite.Sprite):
         self.image = pygame.transform.scale(img, (50, 38))
         self.rect = self.image.get_rect(centerx=WIDTH // 2, bottom=HEIGHT - 10)
         self.radius = 20
-        # --- КД СТРЕЛЬБЫ ---
-        self.shoot_delay = 600  # Теперь 0.6 секунды между пулями
+        self.shoot_delay = 250 
         self.last_shot = pygame.time.get_ticks()
 
     def update(self):
         keystate = pygame.key.get_pressed()
-        mouse_down = pygame.mouse.get_pressed()[0]
-        
-        # Движение (ПК + Тач)
-        if keystate[pygame.K_LEFT] or keystate[pygame.K_a] or (mouse_down and pygame.mouse.get_pos()[0] < WIDTH//2):
+        if keystate[pygame.K_LEFT] or keystate[pygame.K_a]:
             self.rect.x -= 8
-        if keystate[pygame.K_RIGHT] or keystate[pygame.K_d] or (mouse_down and pygame.mouse.get_pos()[0] > WIDTH//2):
+        if keystate[pygame.K_RIGHT] or keystate[pygame.K_d]:
             self.rect.x += 8
-
         if self.rect.right > WIDTH: self.rect.right = WIDTH
         if self.rect.left < 0: self.rect.left = 0
 
@@ -86,28 +99,32 @@ class Meteor(pygame.sprite.Sprite):
         self.image_orig = random.choice(sizes)
         self.image = self.image_orig.copy()
         self.rect = self.image.get_rect()
-        self.radius = int(self.rect.width * 0.8 / 2)
+        self.radius = int(self.rect.width * 0.85 / 2)
         self.spawn()
         self.rot = 0
-        self.rot_speed = random.randrange(-3, 3)
+        self.rot_speed = random.randrange(-8, 8)
         self.last_update = pygame.time.get_ticks()
 
     def spawn(self):
         self.rect.x = random.randrange(WIDTH - self.rect.width)
-        self.rect.y = random.randrange(-120, -50)
-        self.speedy = random.randrange(2, 5)
-        self.speedx = random.randrange(-1, 1)
+        self.rect.y = random.randrange(-150, -100)
+        self.speedy = random.randrange(1, 8)
+        self.speedx = random.randrange(-2, 2)
 
     def update(self):
+        # Вращение
         now = pygame.time.get_ticks()
         if now - self.last_update > 50:
             self.last_update = now
             self.rot = (self.rot + self.rot_speed) % 360
-            self.image = pygame.transform.rotate(self.image_orig, self.rot)
-            self.rect = self.image.get_rect(center=self.rect.center)
+            new_image = pygame.transform.rotate(self.image_orig, self.rot)
+            old_center = self.rect.center
+            self.image = new_image
+            self.rect = self.image.get_rect(center=old_center)
+        
         self.rect.y += self.speedy
         self.rect.x += self.speedx
-        if self.rect.top > HEIGHT: self.spawn()
+        if self.rect.top > HEIGHT + 10: self.spawn()
 
 class Bullet(pygame.sprite.Sprite):
     def __init__(self, x, y, img):
@@ -116,58 +133,39 @@ class Bullet(pygame.sprite.Sprite):
         self.rect = self.image.get_rect(midbottom=(x, y))
 
     def update(self):
-        self.rect.y -= 10
+        self.rect.y -= 12
         if self.rect.bottom < 0: self.kill()
 
-# --- МЕНЮ И СТАРТ ---
-
-def show_menu(screen, bg_img):
-    screen.blit(bg_img, (0, 0))
-    draw_text(screen, "SPACE BATTLE", 48, WIDTH // 2, HEIGHT / 4)
-    draw_text(screen, "Arrows/AD to move", 22, WIDTH // 2, HEIGHT / 2)
-    draw_text(screen, "Tap or Key to Start", 26, WIDTH // 2, HEIGHT * 0.7)
-    pygame.display.flip()
-    
-    waiting = True
-    while waiting:
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                pygame.quit()
-                sys.exit()
-            if event.type == pygame.KEYDOWN or event.type == pygame.MOUSEBUTTONDOWN:
-                waiting = False
+# --- ГЛАВНАЯ ФУНКЦИЯ ---
 
 def main():
     pygame.init()
     pygame.mixer.init()
     screen = pygame.display.set_mode((WIDTH, HEIGHT))
-    pygame.display.set_caption("Space Shooter PC/Mobile")
+    pygame.display.set_caption("Space Battle Offline")
     clock = pygame.time.Clock()
 
-    # Загрузка
-    screen.fill(BLACK)
-    draw_text(screen, "CONNECTING...", 30, WIDTH//2, HEIGHT//2)
-    pygame.display.flip()
-
-    # Ассеты
-    bg = fetch_asset(RESOURCE_HUB["background"])
-    p_img = fetch_asset(RESOURCE_HUB["player_ship"])
-    m_img = fetch_asset(RESOURCE_HUB["meteor"])
-    b_img = fetch_asset(RESOURCE_HUB["laser"])
-    m_sizes = [pygame.transform.scale(m_img, (s, s)) for s in [30, 45, 60]]
-    s_shoot = fetch_asset(RESOURCE_HUB["snd_shoot"], False)
-    s_expl = fetch_asset(RESOURCE_HUB["snd_expl"], False)
-
-    # Музыка (включаем сразу)
+    # Загрузка ресурсов
     try:
-        music_raw = requests.get(RESOURCE_HUB["music"]).content
-        pygame.mixer.music.load(BytesIO(music_raw))
-        pygame.mixer.music.set_volume(0.3)
-        pygame.mixer.music.play(-1)
-    except: pass
+        bg = pygame.image.load(os.path.join(img_dir, "starfield.png")).convert()
+        p_img = pygame.image.load(os.path.join(img_dir, "player.png")).convert_alpha()
+        m_img = pygame.image.load(os.path.join(img_dir, "meteor.png")).convert_alpha()
+        b_img = pygame.image.load(os.path.join(img_dir, "laser.png")).convert_alpha()
+        
+        m_sizes = [pygame.transform.scale(m_img, (s, s)) for s in [30, 45, 60]]
+        
+        s_shoot = pygame.mixer.Sound(os.path.join(snd_dir, "pew.wav"))
+        s_expl = pygame.mixer.Sound(os.path.join(snd_dir, "expl.wav"))
+        pygame.mixer.music.load(os.path.join(snd_dir, "music.ogg"))
+        pygame.mixer.music.set_volume(0.2)
+    except Exception as e:
+        print(f"Ошибка: {e}. Проверь папку assets!")
+        pygame.quit()
+        sys.exit()
 
-    while True: # Глобальный цикл для возможности рестарта
+    while True: # Глобальный цикл для рестартов
         show_menu(screen, bg)
+        pygame.mixer.music.play(-1)
         
         all_sprites = pygame.sprite.Group()
         mobs = pygame.sprite.Group()
@@ -191,27 +189,29 @@ def main():
                     pygame.quit()
                     sys.exit()
 
-            # Стрельба (автоматическая, с учетом КД)
+            # Обновление
             player.shoot(b_img, s_shoot, all_sprites, bullets)
-            
             all_sprites.update()
 
-            # Коллизии
+            # Коллизии Пуля - Метеор
             hits = pygame.sprite.groupcollide(mobs, bullets, True, True, pygame.sprite.collide_circle)
             for hit in hits:
                 score += 10
-                if s_expl: s_expl.play()
+                s_expl.play()
                 m = Meteor(m_sizes)
                 all_sprites.add(m)
                 mobs.add(m)
 
+            # Коллизия Игрок - Метеор
             if pygame.sprite.spritecollide(player, mobs, False, pygame.sprite.collide_circle):
-                game_running = False # Выход в главное меню
+                pygame.mixer.music.stop()
+                show_go_screen(screen, bg, score)
+                game_running = False # Выход из игрового цикла в меню
 
             # Отрисовка
             screen.blit(bg, (0, 0))
             all_sprites.draw(screen)
-            draw_text(screen, f"Score: {score}", 20, WIDTH//2, 10)
+            draw_text(screen, f"Score: {score}", 20, WIDTH // 2, 10)
             pygame.display.flip()
 
 if __name__ == "__main__":
