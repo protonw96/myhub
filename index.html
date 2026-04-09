@@ -1,99 +1,99 @@
-рimport pygame
+import pygame
 import random
 import os
 import sys
 
-# --- ИНИЦИАЛИЗАЦИЯ И НАСТРОЙКИ ПУТЕЙ ---
-pygame.init()
-pygame.mixer.init()
-
-# Указываем пути к папкам
+# --- НАСТРОЙКИ ПУТЕЙ ---
 BASE_DIR = os.path.dirname(__file__)
 IMG_DIR = os.path.join(BASE_DIR, 'assets', 'img')
 SND_DIR = os.path.join(BASE_DIR, 'assets', 'snd')
 
-# Константы
+# --- КОНСТАНТЫ ---
 WIDTH, HEIGHT = 480, 600
 FPS = 60
 WHITE = (255, 255, 255)
 BLACK = (0, 0, 0)
 METEOR_COUNT = 8
 
-# Настройка окна
+# --- ИНИЦИАЛИЗАЦИЯ ---
+pygame.init()
+pygame.mixer.init()
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
-pygame.display.set_caption("Space Battle: Final Edition")
+pygame.display.set_caption("Space Battle: Final")
 clock = pygame.time.Clock()
 
 # --- ФУНКЦИЯ БЕЗОПАСНОЙ ЗАГРУЗКИ ---
-def load_resource(type, folder, name):
-    path = os.path.join(folder, name)
+def load_img(name, use_alpha=True):
+    path = os.path.join(IMG_DIR, name)
     try:
-        if type == 'img':
-            return pygame.image.load(path).convert_alpha()
-        elif type == 'bg':
-            return pygame.image.load(path).convert()
-        elif type == 'snd':
-            return pygame.mixer.Sound(path)
-    except Exception:
-        print(f"ОШИБКА: Файл не найден по пути: {path}")
-        # Если файла нет, создаем "заглушку", чтобы игра не упала
+        img = pygame.image.load(path)
+        return img.convert_alpha() if use_alpha else img.convert()
+    except:
+        print(f"ПРЕДУПРЕЖДЕНИЕ: Файл {name} не найден. Создана заглушка.")
         surf = pygame.Surface((50, 50))
-        surf.fill((255, 0, 0))
-        return surf if type != 'snd' else None
+        surf.fill((random.randint(0,255), 0, 0))
+        return surf
 
-# Загрузка ассетов
-BG_IMG = load_resource('bg', IMG_DIR, 'starfield.png')
-PLAYER_IMG = load_resource('img', IMG_DIR, 'player.png')
-METEOR_IMG = load_resource('img', IMG_DIR, 'meteor.png')
-LASER_IMG = load_resource('img', IMG_DIR, 'laser.png')
-SHOOT_SND = load_resource('snd', SND_DIR, 'pew.wav')
-EXPL_SND = load_resource('snd', SND_DIR, 'expl.wav')
+def load_snd(name):
+    path = os.path.join(SND_DIR, name)
+    try:
+        return pygame.mixer.Sound(path)
+    except:
+        return None
 
-# Загрузка музыки (отдельно)
+# --- ЗАГРУЗКА РЕСУРСОВ ---
+BG_IMG = load_img('starfield.png', False)
+# Масштабируем фон под размер окна
+BG_IMG = pygame.transform.scale(BG_IMG, (WIDTH, HEIGHT))
+PLAYER_IMG = load_img('player.png')
+METEOR_IMG = load_img('meteor.png')
+LASER_IMG = load_img('laser.png')
+
+SHOOT_SND = load_snd('pew.wav')
+EXPL_SND = load_snd('expl.wav')
+
 try:
     pygame.mixer.music.load(os.path.join(SND_DIR, 'music.ogg'))
     pygame.mixer.music.set_volume(0.2)
 except:
-    print("Музыка не найдена, играем в тишине")
-
-# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
-
-def draw_text(text, size, x, y):
-    font = pygame.font.SysFont("arial", size, bold=True)
-    surface = font.render(text, True, WHITE)
-    rect = surface.get_rect(midtop=(x, y))
-    screen.blit(surface, rect)
+    pass
 
 # --- КЛАССЫ ---
+
+def draw_text(surf, text, size, x, y):
+    font = pygame.font.SysFont("arial", size, bold=True)
+    text_surface = font.render(text, True, WHITE)
+    text_rect = text_surface.get_rect(midtop=(x, y))
+    surf.blit(text_surface, text_rect)
 
 class Player(pygame.sprite.Sprite):
     def __init__(self):
         super().__init__()
         self.image = pygame.transform.scale(PLAYER_IMG, (50, 38))
-        self.rect = self.image.get_rect(centerx=WIDTH//2, bottom=HEIGHT-10)
+        self.rect = self.image.get_rect(centerx=WIDTH // 2, bottom=HEIGHT - 10)
         self.radius = 20
         self.last_shot = pygame.time.get_ticks()
-        self.delay = 250
 
     def update(self):
         keys = pygame.key.get_pressed()
         if keys[pygame.K_LEFT] or keys[pygame.K_a]: self.rect.x -= 8
         if keys[pygame.K_RIGHT] or keys[pygame.K_d]: self.rect.x += 8
-        self.rect.clamp_ip(screen.get_rect()) # Не дает выйти за экран
+        if self.rect.right > WIDTH: self.rect.right = WIDTH
+        if self.rect.left < 0: self.rect.left = 0
 
-    def shoot(self, sprites, bullets):
+    def shoot(self, all_sprites, bullets):
         now = pygame.time.get_ticks()
-        if now - self.last_shot > self.delay:
+        if now - self.last_shot > 250:
             self.last_shot = now
             b = Bullet(self.rect.centerx, self.rect.top)
-            sprites.add(b)
+            all_sprites.add(b)
             bullets.add(b)
             if SHOOT_SND: SHOOT_SND.play()
 
 class Meteor(pygame.sprite.Sprite):
     def __init__(self):
         super().__init__()
-        size = random.randint(30, 70)
+        size = random.randint(30, 60)
         self.image_orig = pygame.transform.scale(METEOR_IMG, (size, size))
         self.image = self.image_orig.copy()
         self.rect = self.image.get_rect()
@@ -105,7 +105,7 @@ class Meteor(pygame.sprite.Sprite):
     def spawn(self):
         self.rect.x = random.randrange(WIDTH - self.rect.width)
         self.rect.y = random.randrange(-100, -40)
-        self.speedy = random.randint(2, 6)
+        self.speedy = random.randint(2, 7)
         self.speedx = random.randint(-1, 1)
 
     def update(self):
@@ -119,7 +119,7 @@ class Meteor(pygame.sprite.Sprite):
 class Bullet(pygame.sprite.Sprite):
     def __init__(self, x, y):
         super().__init__()
-        self.image = LASER_IMG
+        self.image = pygame.transform.scale(LASER_IMG, (10, 20))
         self.rect = self.image.get_rect(midbottom=(x, y))
 
     def update(self):
@@ -130,10 +130,10 @@ class Bullet(pygame.sprite.Sprite):
 
 def show_screen(title, subtitle, score=None):
     screen.blit(BG_IMG, (0, 0))
-    draw_text(title, 64, WIDTH // 2, HEIGHT / 4)
+    draw_text(screen, title, 64, WIDTH // 2, HEIGHT / 4)
     if score is not None:
-        draw_text(f"SCORE: {score}", 32, WIDTH // 2, HEIGHT / 2)
-    draw_text(subtitle, 24, WIDTH // 2, HEIGHT * 0.75)
+        draw_text(screen, f"FINAL SCORE: {score}", 36, WIDTH // 2, HEIGHT / 2)
+    draw_text(screen, subtitle, 22, WIDTH // 2, HEIGHT * 0.75)
     pygame.display.flip()
     
     waiting = True
@@ -142,17 +142,15 @@ def show_screen(title, subtitle, score=None):
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 pygame.quit(); sys.exit()
-            if event.type == pygame.KEYDOWN:
+            if event.type == pygame.KEYDOWN or event.type == pygame.MOUSEBUTTONDOWN:
                 waiting = False
 
 # --- ГЛАВНЫЙ ЦИКЛ ---
 
-def game_loop():
+def main():
     while True:
-        # 1. Меню
         show_screen("SPACE BATTLE", "Press any key to START")
         
-        # 2. Инициализация уровня
         all_sprites = pygame.sprite.Group()
         mobs = pygame.sprite.Group()
         bullets = pygame.sprite.Group()
@@ -165,18 +163,17 @@ def game_loop():
             mobs.add(m)
         
         score = 0
-        if pygame.mixer.music.get_busy() == False:
-            try: pygame.mixer.music.play(-1)
-            except: pass
+        try: pygame.mixer.music.play(-1)
+        except: pass
 
-        # 3. Геймплей
         running = True
         while running:
             clock.tick(FPS)
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     pygame.quit(); sys.exit()
-            
+
+            # Обновление
             player.shoot(all_sprites, bullets)
             all_sprites.update()
 
@@ -191,16 +188,16 @@ def game_loop():
 
             if pygame.sprite.spritecollide(player, mobs, False, pygame.sprite.collide_circle):
                 pygame.mixer.music.stop()
-                running = False # Переход к Game Over
+                running = False 
 
             # Отрисовка
+            screen.fill(BLACK)
             screen.blit(BG_IMG, (0, 0))
             all_sprites.draw(screen)
-            draw_text(f"Score: {score}", 20, WIDTH // 2, 10)
+            draw_text(screen, f"Score: {score}", 20, WIDTH // 2, 10)
             pygame.display.flip()
         
-        # 4. Экран конца игры
         show_screen("GAME OVER", "Press any key to RESTART", score)
 
 if __name__ == "__main__":
-    game_loop()
+    main()
