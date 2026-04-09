@@ -6,16 +6,16 @@ import sys
 # --- НАСТРОЙКИ ---
 WIDTH, HEIGHT = 480, 600
 FPS = 60
-WIN_SCORE = 120  # Очки для победы
 WHITE = (255, 255, 255)
 BLACK = (0, 0, 0)
 GOLD = (255, 215, 0)
-GREEN = (0, 255, 0)
+RED = (255, 50, 50)
+GREEN = (50, 255, 50)
 
 pygame.init()
 pygame.mixer.init()
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
-pygame.display.set_caption("Space Battle: Win at 120")
+pygame.display.set_caption("Space Battle: Evolution")
 clock = pygame.time.Clock()
 
 # Пути
@@ -23,30 +23,38 @@ BASE_DIR = os.path.dirname(__file__)
 IMG_DIR = os.path.join(BASE_DIR, 'assets', 'img')
 SND_DIR = os.path.join(BASE_DIR, 'assets', 'snd')
 
-# --- ЗАГРУЗКА ---
+# --- ЗАГРУЗКА РЕСУРСОВ ---
 def load_img(name, alpha=True):
     path = os.path.join(IMG_DIR, name)
     try:
         img = pygame.image.load(path)
         return img.convert_alpha() if alpha else img.convert()
     except:
-        s = pygame.Surface((40, 40)); s.fill((200, 0, 0))
-        return s
+        s = pygame.Surface((40, 40)); s.fill(RED); return s
 
 BG_IMG = pygame.transform.scale(load_img('starfield.png', False), (WIDTH, HEIGHT))
 PLAYER_IMG = load_img('player.png')
 METEOR_IMG = load_img('meteor.png')
 LASER_IMG = load_img('laser.png')
-SHOOT_SND = os.path.join(SND_DIR, 'pew.wav')
-EXPL_SND = os.path.join(SND_DIR, 'expl.wav')
+ENEMY_IMG = load_img('enemy.png') # Добавь картинку врага
+POWERUP_IMG = load_img('bolt.png') # Добавь картинку бонуса
+
+# --- ГЛОБАЛЬНЫЕ ДАННЫЕ ИГРОКА ---
+player_data = {
+    "money": 0,
+    "max_hp": 3,
+    "shoot_speed": 180,
+    "damage_mult": 1
+}
 
 # --- КЛАССЫ ---
 
 def draw_text(surf, text, size, x, y, color=WHITE):
     font = pygame.font.SysFont("arial", size, bold=True)
-    txt = font.render(text, True, color)
+    txt = font.render(str(text), True, color)
     rect = txt.get_rect(midtop=(x, y))
     surf.blit(txt, rect)
+    return rect
 
 class Player(pygame.sprite.Sprite):
     def __init__(self):
@@ -54,24 +62,34 @@ class Player(pygame.sprite.Sprite):
         self.image = pygame.transform.scale(PLAYER_IMG, (50, 38))
         self.rect = self.image.get_rect(centerx=WIDTH//2, bottom=HEIGHT-10)
         self.radius = 20
+        self.hp = player_data["max_hp"]
         self.last_shot = pygame.time.get_ticks()
-        self.shoot_delay = 150
+        self.powerup_timer = 0
+        self.triple_shot = False
 
     def update(self):
         keys = pygame.key.get_pressed()
         if keys[pygame.K_LEFT] or keys[pygame.K_a]: self.rect.x -= 8
         if keys[pygame.K_RIGHT] or keys[pygame.K_d]: self.rect.x += 8
         self.rect.clamp_ip(screen.get_rect())
+        
+        if self.triple_shot and pygame.time.get_ticks() > self.powerup_timer:
+            self.triple_shot = False
 
-    def auto_shoot(self, sprites, bullets):
+    def auto_shoot(self, all_sprites, bullets):
         now = pygame.time.get_ticks()
-        if now - self.last_shot > self.shoot_delay:
+        if now - self.last_shot > player_data["shoot_speed"]:
             self.last_shot = now
-            b = Bullet(self.rect.centerx, self.rect.top)
-            sprites.add(b)
-            bullets.add(b)
-            try: pygame.mixer.Sound(SHOOT_SND).play()
-            except: pass
+            if not self.triple_shot:
+                self.fire_bullet(self.rect.centerx, self.rect.top, 0, all_sprites, bullets)
+            else:
+                for dx in [-15, 0, 15]:
+                    self.fire_bullet(self.rect.centerx + dx, self.rect.top, dx//5, all_sprites, bullets)
+
+    def fire_bullet(self, x, y, speedx, all_sprites, bullets):
+        b = Bullet(x, y, speedx)
+        all_sprites.add(b)
+        bullets.add(b)
 
 class Meteor(pygame.sprite.Sprite):
     def __init__(self, level):
@@ -81,7 +99,7 @@ class Meteor(pygame.sprite.Sprite):
         self.image = self.image_orig.copy()
         self.rect = self.image.get_rect()
         self.radius = int(self.rect.width * 0.8 / 2)
-        self.speedy = random.randint(2 + level, 5 + level * 2)
+        self.speedy = random.randint(2 + level//2, 4 + level)
         self.spawn()
 
     def spawn(self):
@@ -92,121 +110,172 @@ class Meteor(pygame.sprite.Sprite):
         self.rect.y += self.speedy
         if self.rect.top > HEIGHT: self.spawn()
 
-class Bullet(pygame.sprite.Sprite):
-    def __init__(self, x, y):
+class Enemy(pygame.sprite.Sprite):
+    def __init__(self, level):
         super().__init__()
-        self.image = pygame.transform.scale(LASER_IMG, (10, 20))
+        # 1. Загружаем картинку врага
+        img = load_img('enemy.png') 
+        
+        # 2. РАЗВОРАЧИВАЕМ ЕЁ: 180 градусов — это носом вниз
+        img = pygame.transform.rotate(img, 180)
+        
+        # 3. Устанавливаем размер (40 пикселей в ширину, 30 в высоту)
+        self.image = pygame.transform.scale(img, (40, 30))
+        
+        self.rect = self.image.get_rect()
+        
+        # Настройка скорости (зависит от уровня)
+        self.speedy = level 
+        self.speedx = random.choice([-3, 3])
+        self.spawn()
+
+    def spawn(self):
+        self.rect.x = random.randrange(WIDTH - self.rect.width)
+        self.rect.y = random.randrange(-200, -100)
+
+    def update(self):
+        self.rect.y += self.speedy
+        self.rect.x += self.speedx
+        # Отскок от боковых стенок экрана
+        if self.rect.left <= 0 or self.rect.right >= WIDTH:
+            self.speedx *= -1
+        # Если улетел вниз — заново сверху
+        if self.rect.top > HEIGHT: 
+            self.spawn()
+
+class Bullet(pygame.sprite.Sprite):
+    def __init__(self, x, y, speedx):
+        super().__init__()
+        self.image = pygame.transform.scale(LASER_IMG, (6, 15))
         self.rect = self.image.get_rect(midbottom=(x, y))
+        self.speedx = speedx
 
     def update(self):
         self.rect.y -= 12
+        self.rect.x += self.speedx
         if self.rect.bottom < 0: self.kill()
 
-# --- ЭКРАНЫ ---
+class PowerUp(pygame.sprite.Sprite):
+    def __init__(self, center):
+        super().__init__()
+        self.image = pygame.transform.scale(POWERUP_IMG, (25, 25))
+        self.rect = self.image.get_rect(center=center)
 
-def select_level_mouse():
-    levels = ["1 - EASY", "2 - NORMAL", "3 - HARD", "4 - INSANE", "5 - NIGHTMARE"]
+    def update(self):
+        self.rect.y += 3
+        if self.rect.top > HEIGHT: self.kill()
+
+# --- СИСТЕМА УРОВНЕЙ И МАГАЗИН ---
+
+def get_win_score(level):
+    # Прогрессия: 200, 300, 450, 675... (на 1.5 больше каждый раз)
+    scores = [200, 300, 450, 600, 800, 1100, 1500, 2000, 2600, 3500]
+    return scores[level-1] if level <= 10 else 99999
+
+def shop_menu():
     while True:
         screen.blit(BG_IMG, (0, 0))
-        draw_text(screen, "SPACE BATTLE", 50, WIDTH//2, 50)
-        draw_text(screen, "CHOOSE LEVEL:", 30, WIDTH//2, 130, GOLD)
+        draw_text(screen, "SPACE SHOP", 50, WIDTH//2, 50, GOLD)
+        draw_text(screen, f"Credits: {player_data['money']}", 30, WIDTH//2, 120, GREEN)
         
-        mouse_pos = pygame.mouse.get_pos()
-        mouse_click = pygame.mouse.get_pressed()
-        
-        for i, text in enumerate(levels):
-            y_pos = 200 + (i * 60)
-            btn_rect = pygame.Rect(WIDTH//2 - 100, y_pos, 200, 40)
-            color = WHITE
-            if btn_rect.collidepoint(mouse_pos):
-                color = GOLD
-                if mouse_click[0]:
-                    pygame.time.wait(200)
-                    return i + 1
-            draw_text(screen, text, 30, WIDTH//2, y_pos, color)
+        # Кнопки улучшений
+        btn_hp = draw_text(screen, f"1. +1 HP ({50 + player_data['max_hp']*20} cr)", 25, WIDTH//2, 220)
+        btn_speed = draw_text(screen, f"2. Faster Gun ({100} cr)", 25, WIDTH//2, 280)
+        btn_exit = draw_text(screen, "PRESS ESC TO CONTINUE", 20, WIDTH//2, 500)
         
         pygame.display.flip()
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT: pygame.quit(); sys.exit()
+        
+        for e in pygame.event.get():
+            if e.type == pygame.QUIT: pygame.quit(); sys.exit()
+            if e.type == pygame.KEYDOWN:
+                if e.key == pygame.K_1 and player_data["money"] >= 50:
+                    player_data["money"] -= 50
+                    player_data["max_hp"] += 1
+                if e.key == pygame.K_2 and player_data["money"] >= 100:
+                    player_data["money"] -= 100
+                    player_data["shoot_speed"] = max(80, player_data["shoot_speed"] - 20)
+                if e.key == pygame.K_ESCAPE: return
 
-def show_end_screen(title, subtitle, score, color):
-    """Экран для победы или проигрыша."""
-    screen.blit(BG_IMG, (0, 0))
-    draw_text(screen, title, 64, WIDTH // 2, HEIGHT / 3, color)
-    draw_text(screen, f"FINAL SCORE: {score}", 32, WIDTH // 2, HEIGHT / 2)
-    draw_text(screen, subtitle, 22, WIDTH // 2, HEIGHT * 0.75)
-    pygame.display.flip()
+# --- ГЛАВНАЯ ИГРА ---
+
+def main_game(level):
+    all_sprites = pygame.sprite.Group()
+    mobs = pygame.sprite.Group()
+    bullets = pygame.sprite.Group()
+    powerups = pygame.sprite.Group()
     
-    pygame.time.wait(1000)
-    waiting = True
-    while waiting:
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT: pygame.quit(); sys.exit()
-            if event.type == pygame.MOUSEBUTTONDOWN or event.type == pygame.KEYDOWN:
-                waiting = False
+    player = Player()
+    all_sprites.add(player)
+    
+    target_score = get_win_score(level)
+    score = 0
+    
+    # Спавн врагов
+    for _ in range(5 + level):
+        m = Meteor(level); all_sprites.add(m); mobs.add(m)
+    if level >= 3:
+        for _ in range(level - 1):
+            e = Enemy(level); all_sprites.add(e); mobs.add(e)
 
-# --- ГЛАВНЫЙ ЦИКЛ ---
+    running = True
+    while running:
+        clock.tick(FPS)
+        for e in pygame.event.get():
+            if e.type == pygame.QUIT: pygame.quit(); sys.exit()
+
+        player.auto_shoot(all_sprites, bullets)
+        all_sprites.update()
+
+        # Коллизии Пули-Мобы
+        hits = pygame.sprite.groupcollide(mobs, bullets, True, True)
+        for hit in hits:
+            score += 10
+            player_data["money"] += 1 # Сбор валюты за каждый сбитый объект
+            if random.random() < 0.1: # Шанс бонуса 10%
+                p = PowerUp(hit.rect.center)
+                all_sprites.add(p); powerups.add(p)
+            # Респавн врага
+            if isinstance(hit, Meteor): m = Meteor(level)
+            else: m = Enemy(level)
+            all_sprites.add(m); mobs.add(m)
+
+        # Коллизии Игрок-Бонусы
+        p_hits = pygame.sprite.spritecollide(player, powerups, True)
+        for p in p_hits:
+            player.triple_shot = True
+            player.powerup_timer = pygame.time.get_ticks() + 5000 # 5 секунд
+
+        # Коллизии Игрок-Мобы
+        if pygame.sprite.spritecollide(player, mobs, True, pygame.sprite.collide_circle):
+            player.hp -= 1
+            if player.hp <= 0: return "LOSS", score
+            # Если еще жив, создаем нового врага взамен взорванного
+            m = Meteor(level); all_sprites.add(m); mobs.add(m)
+
+        if score >= target_score: return "WIN", score
+
+        # Отрисовка
+        screen.blit(BG_IMG, (0, 0))
+        all_sprites.draw(screen)
+        draw_text(screen, f"LVL: {level}  Score: {score}/{target_score}", 20, WIDTH//2, 10)
+        draw_text(screen, f"HP: {player.hp}  $: {player_data['money']}", 20, WIDTH//2, 40, RED)
+        if player.triple_shot: draw_text(screen, "TRIPLE SHOT!", 15, WIDTH//2, 70, GOLD)
+        pygame.display.flip()
 
 def main():
-    while True:
-        level = select_level_mouse()
+    current_level = 1
+    while current_level <= 10:
+        result, final_score = main_game(current_level)
         
-        all_sprites = pygame.sprite.Group()
-        mobs = pygame.sprite.Group()
-        bullets = pygame.sprite.Group()
-        player = Player()
-        all_sprites.add(player)
-        
-        for _ in range(5 + level * 2):
-            m = Meteor(level)
-            all_sprites.add(m)
-            mobs.add(m)
-
-        score = 0
-        game_state = "PLAY" # Возможные состояния: PLAY, WIN, LOSS
-        
-        running = True
-        while running:
-            clock.tick(FPS)
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT: pygame.quit(); sys.exit()
-
-            # Автострельба
-            player.auto_shoot(all_sprites, bullets)
-            all_sprites.update()
-            
-            # Коллизии
-            hits = pygame.sprite.groupcollide(mobs, bullets, True, True)
-            for h in hits:
-                score += 10
-                try: pygame.mixer.Sound(EXPL_SND).play()
-                except: pass
-                m = Meteor(level)
-                all_sprites.add(m)
-                mobs.add(m)
-
-            # Проверка ПОБЕДЫ
-            if score >= WIN_SCORE:
-                game_state = "WIN"
-                running = False
-
-            # Проверка ПРОИГРЫША
-            if pygame.sprite.spritecollide(player, mobs, False, pygame.sprite.collide_circle):
-                game_state = "LOSS"
-                running = False 
-
-            # Отрисовка
-            screen.blit(BG_IMG, (0, 0))
-            all_sprites.draw(screen)
-            draw_text(screen, f"Score: {score}/{WIN_SCORE}", 20, WIDTH//2, 10, GOLD)
-            draw_text(screen, f"Level: {level}", 20, 50, 10)
-            pygame.display.flip()
-
-        # Показываем результат
-        if game_state == "WIN":
-            show_end_screen("YOU WIN!", "Click to play again", score, GREEN)
+        if result == "WIN":
+            if current_level == 10:
+                draw_text(screen, "GALAXY SAVED! FINAL WIN!", 40, WIDTH//2, HEIGHT//2, GOLD)
+                pygame.display.flip(); pygame.time.wait(3000); break
+            current_level += 1
+            shop_menu()
         else:
-            show_end_screen("GAME OVER", "Click to restart", score, (255, 0, 0))
+            # После проигрыша можно зайти в магазин и попробовать тот же уровень снова
+            shop_menu()
 
 if __name__ == "__main__":
     main()
