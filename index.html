@@ -3,25 +3,23 @@ import random
 import os
 import sys
 
-# --- НАСТРОЙКИ ---
+# --- НАСТРОЙКИ И ПУТИ ---
 WIDTH, HEIGHT = 480, 600
 FPS = 60
 WHITE = (255, 255, 255)
-BLACK = (0, 0, 0)
 GOLD = (255, 215, 0)
 
 pygame.init()
 pygame.mixer.init()
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
-pygame.display.set_caption("Space Battle: Full Auto Mode")
+pygame.display.set_caption("Space Battle: FULL AUTO")
 clock = pygame.time.Clock()
 
-# Пути к папкам
 BASE_DIR = os.path.dirname(__file__)
 IMG_DIR = os.path.join(BASE_DIR, 'assets', 'img')
 SND_DIR = os.path.join(BASE_DIR, 'assets', 'snd')
 
-# --- ФУНКЦИИ ЗАГРУЗКИ ---
+# --- ЗАГРУЗКА ---
 def load_img(name, alpha=True):
     path = os.path.join(IMG_DIR, name)
     try:
@@ -35,8 +33,8 @@ BG_IMG = pygame.transform.scale(load_img('starfield.png', False), (WIDTH, HEIGHT
 PLAYER_IMG = load_img('player.png')
 METEOR_IMG = load_img('meteor.png')
 LASER_IMG = load_img('laser.png')
-SHOOT_SND = os.path.join(SND_DIR, 'pew.wav')
-EXPL_SND = os.path.join(SND_DIR, 'expl.wav')
+SHOOT_SND_PATH = os.path.join(SND_DIR, 'pew.wav')
+EXPL_SND_PATH = os.path.join(SND_DIR, 'expl.wav')
 
 # --- КЛАССЫ ---
 
@@ -53,24 +51,26 @@ class Player(pygame.sprite.Sprite):
         self.rect = self.image.get_rect(centerx=WIDTH//2, bottom=HEIGHT-10)
         self.radius = 20
         self.last_shot = pygame.time.get_ticks()
-        self.shoot_delay = 150 # Скорость авто-стрельбы (чем меньше, тем быстрее)
+        self.shoot_delay = 150 # Скорость автострельбы (мс)
 
     def update(self):
-        # Только движение (стрелки или A/D)
         keys = pygame.key.get_pressed()
         if keys[pygame.K_LEFT] or keys[pygame.K_a]: self.rect.x -= 8
         if keys[pygame.K_RIGHT] or keys[pygame.K_d]: self.rect.x += 8
         self.rect.clamp_ip(screen.get_rect())
 
-    def auto_shoot(self, sprites, bullets):
-        # Метод стрельбы без проверки кнопок
+    def auto_shoot(self, all_sprites, bullets):
+        # Стрельба происходит сама по таймеру
         now = pygame.time.get_ticks()
         if now - self.last_shot > self.shoot_delay:
             self.last_shot = now
             b = Bullet(self.rect.centerx, self.rect.top)
-            sprites.add(b)
+            all_sprites.add(b)
             bullets.add(b)
-            try: pygame.mixer.Sound(SHOOT_SND).play()
+            try:
+                s = pygame.mixer.Sound(SHOOT_SND_PATH)
+                s.set_volume(0.1)
+                s.play()
             except: pass
 
 class Meteor(pygame.sprite.Sprite):
@@ -81,7 +81,6 @@ class Meteor(pygame.sprite.Sprite):
         self.image = self.image_orig.copy()
         self.rect = self.image.get_rect()
         self.radius = int(self.rect.width * 0.8 / 2)
-        # Скорость зависит от уровня
         self.speedy = random.randint(2 + level, 5 + level * 2)
         self.spawn()
 
@@ -103,7 +102,7 @@ class Bullet(pygame.sprite.Sprite):
         self.rect.y -= 12
         if self.rect.bottom < 0: self.kill()
 
-# --- МЕНЮ С МЫШКОЙ ---
+# --- МЕНЮ ---
 
 def select_level_mouse():
     levels = ["1 - EASY", "2 - NORMAL", "3 - HARD", "4 - INSANE", "5 - NIGHTMARE"]
@@ -117,15 +116,13 @@ def select_level_mouse():
         
         for i, text in enumerate(levels):
             y_pos = 200 + (i * 60)
+            btn_rect = pygame.Rect(WIDTH//2 - 100, y_pos, 200, 40)
             color = WHITE
-            button_rect = pygame.Rect(WIDTH//2 - 100, y_pos, 200, 40)
-            
-            if button_rect.collidepoint(mouse_pos):
+            if btn_rect.collidepoint(mouse_pos):
                 color = GOLD
                 if mouse_click[0]:
                     pygame.time.wait(200)
                     return i + 1
-            
             draw_text(screen, text, 30, WIDTH//2, y_pos, color)
         
         pygame.display.flip()
@@ -144,7 +141,6 @@ def main():
         player = Player()
         all_sprites.add(player)
         
-        # Количество врагов
         for _ in range(5 + level * 2):
             m = Meteor(level)
             all_sprites.add(m)
@@ -154,21 +150,19 @@ def main():
         running = True
         while running:
             clock.tick(FPS)
-            
             for event in pygame.event.get():
                 if event.type == pygame.QUIT: pygame.quit(); sys.exit()
 
-            # --- ВОТ ТУТ ОН СТРЕЛЯЕТ САМ ---
+            # САМО СТРЕЛЯЕТ ТУТ:
             player.auto_shoot(all_sprites, bullets)
 
-            # Обновление всех объектов
             all_sprites.update()
             
             # Коллизии
             hits = pygame.sprite.groupcollide(mobs, bullets, True, True)
             for h in hits:
                 score += 10
-                try: pygame.mixer.Sound(EXPL_SND).play()
+                try: pygame.mixer.Sound(EXPL_SND_PATH).play()
                 except: pass
                 m = Meteor(level)
                 all_sprites.add(m)
@@ -177,21 +171,20 @@ def main():
             if pygame.sprite.spritecollide(player, mobs, False, pygame.sprite.collide_circle):
                 running = False 
 
-            # Отрисовка
             screen.blit(BG_IMG, (0, 0))
             all_sprites.draw(screen)
             draw_text(screen, f"Score: {score}", 20, 70, 10)
-            draw_text(screen, f"Lvl: {level}", 20, WIDTH-50, 10, GOLD)
+            draw_text(screen, f"Level: {level}", 20, WIDTH-50, 10, GOLD)
             pygame.display.flip()
 
-        # Game Over
+        # GAME OVER
         screen.blit(BG_IMG, (0, 0))
         draw_text(screen, "GAME OVER", 60, WIDTH//2, HEIGHT//3)
         draw_text(screen, f"SCORE: {score}", 30, WIDTH//2, HEIGHT//2)
         draw_text(screen, "Click to Menu", 25, WIDTH//2, HEIGHT*0.8)
         pygame.display.flip()
-        
         pygame.time.wait(1000)
+        
         wait = True
         while wait:
             for e in pygame.event.get():
