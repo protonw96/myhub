@@ -1,0 +1,263 @@
+import pygame
+import sys
+import math
+import random
+
+# Инициализация Pygame
+pygame.init()
+
+# Экран (сделали его более вертикальным для режима "пенальти/атака")
+WIDTH, HEIGHT = 800, 700
+screen = pygame.display.set_mode((WIDTH, HEIGHT))
+pygame.display.set_caption("2D Футбол: Пробей вратаря!")
+clock = pygame.time.Clock()
+
+# Константы ворот (находятся сверху экрана)
+GOAL_X_LEFT = 200
+GOAL_X_RIGHT = 600
+GOAL_Y = 80
+
+# Размеры
+PLAYER_SIZE = 50
+BALL_RADIUS = 18
+
+# Цвета
+WHITE = (255, 255, 255)
+BLACK = (0, 0, 0)
+RED = (255, 0, 0)
+
+# --- БЕЗОПАСНАЯ ЗАГРУЗКА ТЕКСТУР ---
+def load_image(filename, scale_to=None, has_alpha=True):
+    try:
+        img = pygame.image.load(filename)
+        img = img.convert_alpha() if has_alpha else img.convert()
+        if scale_to:
+            img = pygame.transform.scale(img, scale_to)
+        return img
+    except pygame.error:
+        # Если текстуры нет — создаем цветную заглушку
+        size = scale_to if scale_to else (50, 50)
+        fallback = pygame.Surface(size, pygame.SRCALPHA)
+        if "footbal" in filename:
+            pygame.draw.circle(fallback, WHITE, (size[0]//2, size[1]//2), size[0]//2)
+        elif "footballer" in filename:
+            fallback.fill((30, 144, 255))  # Синий игрок
+        else:
+            fallback.fill((34, 139, 34))  # Зеленое поле
+        return fallback
+
+# Загрузка твоих картинок
+field_img = load_image("pole.png", (WIDTH, HEIGHT), has_alpha=False)
+ball_img = load_image("footbal.png", (BALL_RADIUS * 2, BALL_RADIUS * 2))
+player_img = load_image("footballer1.png", (PLAYER_SIZE, PLAYER_SIZE))
+
+# Для вратаря развернем игрока вверх ногами или лицом к югу (просто перевернем по вертикали)
+gk_img = pygame.transform.flip(player_img, False, True)
+
+
+class Player:
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+        self.size = PLAYER_SIZE
+        self.vx = 0
+        self.vy = 0
+        self.speed = 6
+
+    def move(self, keys):
+        self.vx = 0
+        self.vy = 0
+        if keys[pygame.K_a] or keys[pygame.K_LEFT]: self.vx = -self.speed
+        if keys[pygame.K_d] or keys[pygame.K_RIGHT]: self.vx = self.speed
+        if keys[pygame.K_w] or keys[pygame.K_UP]: self.vy = -self.speed
+        if keys[pygame.K_s] or keys[pygame.K_DOWN]: self.vy = self.speed
+
+        self.x += self.vx
+        self.y += self.vy
+
+        # Ограничения, чтобы нападающий не забегал за ворота и границы поля
+        self.x = max(self.size//2, min(WIDTH - self.size//2, self.x))
+        self.y = max(GOAL_Y + 100, min(HEIGHT - self.size//2, self.y))
+
+    def draw(self, surface):
+        surface.blit(player_img, (int(self.x - self.size/2), int(self.y - self.size/2)))
+
+
+class Goalkeeper:
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+        self.size = PLAYER_SIZE
+        self.speed = 4.5  # Скорость реакции вратаря
+        self.target_x = x
+
+    def update(self, ball):
+        # Логика вратаря: если мяч летит в сторону ворот, вратарь преследует его координату X
+        if ball.vy < 0:  # Мяч летит вверх (атака)
+            self.target_x = ball.x
+        else:
+            # Если мяч далеко или на месте, вратарь возвращается к центру ворот
+            self.target_x = WIDTH // 2
+
+        # Плавное движение к цели
+        if self.x < self.target_x:
+            self.x += min(self.speed, self.target_x - self.x)
+        elif self.x > self.target_x:
+            self.x -= min(self.speed, self.x - self.target_x)
+
+        # Ограничиваем движение вратаря штангами ворот (плюс небольшой запас)
+        self.x = max(GOAL_X_LEFT + self.size//2, min(GOAL_X_RIGHT - self.size//2, self.x))
+
+    def draw(self, surface):
+        surface.blit(gk_img, (int(self.x - self.size/2), int(self.y - self.size/2)))
+
+
+class Ball:
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+        self.radius = BALL_RADIUS
+        self.vx = 0
+        self.vy = 0
+        self.friction = 0.98  # Трение о газон
+
+    def update(self):
+        self.x += self.vx
+        self.y += self.vy
+
+        self.vx *= self.friction
+        self.vy *= self.friction
+
+        # Отскок от левой и правой бровки поля
+        if self.x - self.radius <= 0:
+            self.x = self.radius
+            self.vx *= -1
+        elif self.x + self.radius >= WIDTH:
+            self.x = WIDTH - self.radius
+            self.vx *= -1
+
+        # Отскок от нижней стены
+        if self.y + self.radius >= HEIGHT:
+            self.y = HEIGHT - self.radius
+            self.vy *= -1
+
+    def draw(self, surface):
+        surface.blit(ball_img, (int(self.x - self.radius), int(self.y - self.radius)))
+
+
+def check_player_ball_collision(player, ball):
+    dx = ball.x - player.x
+    dy = ball.y - player.y
+    distance = math.hypot(dx, dy)
+    min_dist = (player.size / 2) + ball.radius
+
+    if distance < min_dist:
+        overlap = min_dist - distance
+        if distance > 0:
+            ball.x += (dx / distance) * overlap
+            ball.y += (dy / distance) * overlap
+        
+        # Сильный пинок вперед при столкновении с бегущим игроком
+        ball.vx = (ball.x - player.x) * 0.3 + player.vx * 1.3
+        ball.vy = (ball.y - player.y) * 0.3 + player.vy * 1.3
+
+
+def check_gk_saves(gk, ball):
+    # Проверка: поймал ли вратарь мяч
+    dx = ball.x - gk.x
+    dy = ball.y - gk.y
+    distance = math.hypot(dx, dy)
+    min_dist = (gk.size / 2) + ball.radius
+
+    if distance < min_dist:
+        # Вратарь поймал! Отбивает мяч обратно в поле с приличной силой
+        ball.vy = random.uniform(5, 9)  # Летит вниз
+        ball.vx = random.uniform(-4, 4) # Немного вбок
+        return True
+    return False
+
+
+def main():
+    player = Player(WIDTH // 2, HEIGHT - 150)
+    goalkeeper = Goalkeeper(WIDTH // 2, GOAL_Y + 20)
+    ball = Ball(WIDTH // 2, HEIGHT // 2)
+
+    score_player = 0
+    score_gk = 0
+    message = ""
+    message_timer = 0
+    
+    font = pygame.font.SysFont("Arial", 36, bold=True)
+    ui_font = pygame.font.SysFont("Arial", 24, bold=True)
+
+    running = True
+    while running:
+        clock.tick(60)
+        keys = pygame.key.get_pressed()
+
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+
+        # Движение сущностей
+        player.move(keys)
+        goalkeeper.update(ball)
+        ball.update()
+
+        # Коллизии
+        check_player_ball_collision(player, ball)
+        
+        if check_gk_saves(goalkeeper, ball):
+            message = "ВРАТАРЬ СВЕРШИЛ СЕЙВ!"
+            message_timer = 60  # Показать текст на 1 секунду
+            score_gk += 1
+
+        # Проверка гола или промаха
+        if ball.y < GOAL_Y:  # Мяч пересёк линию ворот по высоте
+            if GOAL_X_LEFT <= ball.x <= GOAL_X_RIGHT:
+                # ГОЛ!
+                score_player += 1
+                message = "ГОООООЛ!"
+            else:
+                # МИМО ВОРОТ
+                score_gk += 1
+                message = "МИМО!"
+            
+            message_timer = 60
+            # Перезапуск раунда (мяч на центр, игроки на исходные)
+            ball.__init__(WIDTH // 2, HEIGHT // 2)
+            player.__init__(WIDTH // 2, HEIGHT - 150)
+            goalkeeper.__init__(WIDTH // 2, GOAL_Y + 20)
+
+        # Отрисовка фона (твоего поля)
+        screen.blit(field_img, (0, 0))
+
+        # Отрисовка каркаса ворот (белая штанга и сетка)
+        pygame.draw.rect(screen, (50, 50, 50), (GOAL_X_LEFT, GOAL_Y - 40, GOAL_X_RIGHT - GOAL_X_LEFT, 40)) # Сетка
+        pygame.draw.line(screen, WHITE, (GOAL_X_LEFT, GOAL_Y), (GOAL_X_RIGHT, GOAL_Y), 6) # Линия ворот
+        pygame.draw.circle(screen, WHITE, (GOAL_X_LEFT, GOAL_Y), 6)  # Левая штанга
+        pygame.draw.circle(screen, WHITE, (GOAL_X_RIGHT, GOAL_Y), 6) # Правая штанга
+
+        # Рисуем персонажей и мяч
+        goalkeeper.draw(screen)
+        player.draw(screen)
+        ball.draw(screen)
+
+        # Вывод Счета
+        score_text = font.render(f"Игрок {score_player} : {score_gk} Вратарь", True, WHITE)
+        screen.blit(score_text, (20, 20))
+
+        # Вывод всплывающих сообщений (ГОЛ / СЕЙВ / МИМО)
+        if message_timer > 0:
+            msg_text = font.render(message, True, RED if "ВРАТАРЬ" in message or "МИМО" in message else (0, 255, 0))
+            text_rect = msg_text.get_rect(center=(WIDTH // 2, HEIGHT // 2))
+            screen.blit(msg_text, text_rect)
+            message_timer -= 1
+
+        pygame.display.flip()
+
+    pygame.quit()
+    sys.exit()
+
+if __name__ == "__main__":
+    main()
