@@ -1,0 +1,245 @@
+import pygame
+import sys
+import math
+
+# Инициализация Pygame
+pygame.init()
+
+# Константы экрана
+WIDTH, HEIGHT = 1000, 600
+screen = pygame.display.set_mode((WIDTH, HEIGHT))
+pygame.display.set_caption("2D Футбол с текстурами")
+clock = pygame.time.Clock()
+
+# Размеры объектов
+PLAYER_SIZE = 50  
+BALL_RADIUS = 20
+GOAL_WIDTH = 20
+GOAL_HEIGHT = 160
+
+# Ворота (Y-координаты верхнего и нижнего краев)
+GOAL_Y_TOP = HEIGHT // 2 - GOAL_HEIGHT // 2
+GOAL_Y_BOTTOM = HEIGHT // 2 + GOAL_HEIGHT // 2
+
+# Цвета для текста и заглушек
+WHITE = (255, 255, 255)
+BLACK = (0, 0, 0)
+
+# --- ФУНКЦИЯ БЕЗОПАСНОЙ ЗАГРУЗКИ ТЕКСТУР ---
+def load_image(filename, scale_to=None, has_alpha=True):
+    try:
+        # Пытаемся загрузить картинку
+        img = pygame.image.load(filename)
+        if has_alpha:
+            img = img.convert_alpha()
+        else:
+            img = img.convert()
+        
+        # Масштабируем под игровые размеры
+        if scale_to:
+            img = pygame.transform.scale(img, scale_to)
+        return img
+    except pygame.error as e:
+        # Если файл не найден — выводим красивое предупреждение и делаем заглушку
+        print(f"\n[!] Предупреждение: Не удалось загрузить '{filename}'. Использую заглушку.")
+        print(f"    Проверьте, что файл лежит в той же папке и назван без ошибок. (Ошибка: {e})")
+        
+        size = scale_to if scale_to else (100, 100)
+        fallback = pygame.Surface(size, pygame.SRCALPHA)
+        
+        if "footbal" in filename:
+            # Делаем белый кружок вместо мяча
+            pygame.draw.circle(fallback, (255, 255, 255), (size[0]//2, size[1]//2), size[0]//2)
+            pygame.draw.circle(fallback, (0, 0, 0), (size[0]//2, size[1]//2), size[0]//2, 2)
+        elif "footballer" in filename:
+            # Делаем синий квадрат вместо игрока
+            fallback.fill((30, 144, 255))
+            pygame.draw.rect(fallback, (255, 255, 255), (0, 0, size[0], size[1]), 2)
+        else:
+            # Генерируем простое зеленое поле с линией по центру
+            fallback.fill((34, 139, 34))
+            pygame.draw.line(fallback, (255, 255, 255), (size[0]//2, 0), (size[0]//2, size[1]), 4)
+            pygame.draw.circle(fallback, (255, 255, 255), (size[0]//2, size[1]//2), 80, 4)
+            
+        return fallback
+
+# Загружаем ресурсы (используем имена файлов строго из вашего запроса)
+field_img = load_image("pole.png", (WIDTH, HEIGHT), has_alpha=False)
+ball_img = load_image("footbal.png", (BALL_RADIUS * 2, BALL_RADIUS * 2))
+player_img_right = load_image("footballer1.png", (PLAYER_SIZE, PLAYER_SIZE))
+
+# Создаем зеркальную копию картинки для бота (чтобы он смотрел влево)
+player_img_left = pygame.transform.flip(player_img_right, True, False)
+
+
+class Player:
+    def __init__(self, x, y, texture, is_bot=False):
+        self.x = x
+        self.y = y
+        self.size = PLAYER_SIZE
+        self.texture = texture
+        self.is_bot = is_bot
+        self.vx = 0
+        self.vy = 0
+        self.speed = 5
+
+    def move(self, keys, ball=None):
+        if not self.is_bot:
+            # Управление игроком 1 (Клавиши WASD)
+            self.vx = 0
+            self.vy = 0
+            if keys[pygame.K_a]: self.vx = -self.speed
+            if keys[pygame.K_d]: self.vx = self.speed
+            if keys[pygame.K_w]: self.vy = -self.speed
+            if keys[pygame.K_s]: self.vy = self.speed
+        else:
+            # Логика искусственного интеллекта для бота
+            if ball:
+                dx = ball.x - self.x
+                dy = ball.y - self.y
+                dist = math.hypot(dx, dy)
+                if dist > 0:
+                    # Бот двигается чуть медленнее игрока, чтобы его можно было обыграть
+                    self.vx = (dx / dist) * (self.speed * 0.8)
+                    self.vy = (dy / dist) * (self.speed * 0.8)
+
+        self.x += self.vx
+        self.y += self.vy
+
+        # Не даем игрокам вылететь за пределы экрана
+        self.x = max(self.size // 2, min(WIDTH - self.size // 2, self.x))
+        self.y = max(self.size // 2, min(HEIGHT - self.size // 2, self.y))
+
+    def draw(self, surface):
+        # Центрируем текстуру по текущим координатам игрока
+        top_left_x = int(self.x - self.size / 2)
+        top_left_y = int(self.y - self.size / 2)
+        surface.blit(self.texture, (top_left_x, top_left_y))
+
+
+class Ball:
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+        self.radius = BALL_RADIUS
+        self.vx = 0
+        self.vy = 0
+        self.friction = 0.98  # Имитация трения мяча о траву
+
+    def update(self):
+        self.x += self.vx
+        self.y += self.vy
+
+        # Эффект плавного замедления
+        self.vx *= self.friction
+        self.vy *= self.friction
+
+        # Отскок от верхнего и нижнего бортиков поля
+        if self.y - self.radius <= 0:
+            self.y = self.radius
+            self.vy *= -1
+        elif self.y + self.radius >= HEIGHT:
+            self.y = HEIGHT - self.radius
+            self.vy *= -1
+
+        # Отскок от левой и правой стены (только если мяч НЕ в плоскости ворот)
+        if self.y < GOAL_Y_TOP or self.y > GOAL_Y_BOTTOM:
+            if self.x - self.radius <= 0:
+                self.x = self.radius
+                self.vx *= -1
+            elif self.x + self.radius >= WIDTH:
+                self.x = WIDTH - self.radius
+                self.vx *= -1
+
+    def draw(self, surface):
+        # Центрируем текстуру мяча
+        top_left_x = int(self.x - self.radius)
+        top_left_y = int(self.y - self.radius)
+        surface.blit(ball_img, (top_left_x, top_left_y))
+
+
+def check_collision(player, ball):
+    # Рассчитываем расстояние между центрами игрока и мяча
+    dx = ball.x - player.x
+    dy = ball.y - player.y
+    distance = math.hypot(dx, dy)
+    min_dist = (player.size / 2) + ball.radius
+
+    if distance < min_dist:
+        # Выталкиваем мяч наружу, чтобы он не застревал внутри текстуры игрока
+        overlap = min_dist - distance
+        if distance > 0:
+            ball.x += (dx / distance) * overlap
+            ball.y += (dy / distance) * overlap
+        
+        # Сила пинка зависит от угла столкновения и скорости бега игрока
+        ball.vx = (ball.x - player.x) * 0.4 + player.vx * 1.2
+        ball.vy = (ball.y - player.y) * 0.4 + player.vy * 1.2
+
+
+def draw_goals():
+    # Отрисовка темных зон ворот поверх поля
+    pygame.draw.rect(screen, BLACK, (0, GOAL_Y_TOP, GOAL_WIDTH, GOAL_HEIGHT), 2)
+    pygame.draw.rect(screen, BLACK, (WIDTH - GOAL_WIDTH, GOAL_Y_TOP, GOAL_WIDTH, GOAL_HEIGHT), 2)
+
+
+def main():
+    player1 = Player(200, HEIGHT // 2, player_img_right)
+    bot = Player(WIDTH - 200, HEIGHT // 2, player_img_left, is_bot=True)
+    ball = Ball(WIDTH // 2, HEIGHT // 2)
+
+    score_p1 = 0
+    score_bot = 0
+    font = pygame.font.SysFont("Arial", 40, bold=True)
+
+    running = True
+    while running:
+        clock.tick(60)  # Стабильные 60 кадров в секунду
+        keys = pygame.key.get_pressed()
+
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+
+        # Обновление движения и проверка ударов
+        player1.move(keys)
+        bot.move(keys, ball)
+        ball.update()
+
+        check_collision(player1, ball)
+        check_collision(bot, ball)
+
+        # Проверка взятия ворот (ГОЛ)
+        if ball.x < 0:  # Забил Бот (мяч улетел за левый край)
+            score_bot += 1
+            ball.__init__(WIDTH // 2, HEIGHT // 2)
+            player1.__init__(200, HEIGHT // 2, player_img_right)
+            bot.__init__(WIDTH - 200, HEIGHT // 2, player_img_left, is_bot=True)
+        elif ball.x > WIDTH:  # Забил Игрок (мяч улетел за правый край)
+            score_p1 += 1
+            ball.__init__(WIDTH // 2, HEIGHT // 2)
+            player1.__init__(200, HEIGHT // 2, player_img_right)
+            bot.__init__(WIDTH - 200, HEIGHT // 2, player_img_left, is_bot=True)
+
+        # Рендеринг сцены
+        screen.blit(field_img, (0, 0))  # Отрисовка поля/фона
+        draw_goals()                    # Отрисовка ворот
+        player1.draw(screen)            # Отрисовка игрока
+        bot.draw(screen)                # Отрисовка бота
+        ball.draw(screen)               # Отрисовка мяча
+
+        # Отрисовка красивого табло со счетом матча
+        score_text = font.render(f"{score_p1} : {score_bot}", True, WHITE)
+        score_rect = score_text.get_rect(center=(WIDTH // 2, 40))
+        # Темная подложка под цифры счета
+        pygame.draw.rect(screen, (0, 0, 0, 120), score_rect.inflate(30, 10))
+        screen.blit(score_text, score_rect)
+
+        pygame.display.flip()
+
+    pygame.quit()
+    sys.exit()
+
+
+if __name__ == "__main__":
+    main()
