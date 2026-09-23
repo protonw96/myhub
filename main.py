@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""AniVox Monitor v4.5.0 (Anti-Freeze Architecture & Direct Anime ID Links)."""
+"""AniVox Monitor v4.6.0 (Render 24/7, Owner Spy, Friend Chat & Anime Episode Tracker)."""
 
 from __future__ import annotations
 
@@ -29,9 +29,11 @@ from pathlib import Path
 from typing import Any, Optional
 
 APP_NAME = "AniVox Monitor"
-VERSION = "4.5.0"
+VERSION = "4.6.0"
 CONFIG_PATH = Path(__file__).with_name("anivox_monitor.json")
 LOG_PATH = Path(__file__).with_name("anivox_monitor.log")
+REPORT_PATH = Path(__file__).with_name("anivox_report.html")
+
 PROFILE_RE = re.compile(
     r"^https?://(?:www\.)?anivox\.fun/profile/([0-9]+)(?:[/?#].*)?$",
     re.IGNORECASE,
@@ -40,18 +42,32 @@ ALLOWED_INTERVALS = (1, 5, 10, 15, 20, 25, 30)
 DEFAULT_INTERVAL = 10
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 "
-    "Chrome/124.0 Mobile Safari/537.36 AniVoxMonitor/4.5"
+    "Chrome/124.0 Mobile Safari/537.36 AniVoxMonitor/4.6"
 )
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
 logger = logging.getLogger(APP_NAME)
 
 TELEGRAM_KEYBOARD = {
     "keyboard": [
         ["📊 Проверить всех", "🌐 Открыть сайт-отчет"],
         ["👥 Мои профили", "➕ Добавить", "🗑 Удалить"],
+        ["🎬 Аниме трекер", "💬 Чат друзей"],
         ["📈 История", "🎭 Друзья"],
         ["⚙️ Настройки", "🔕 Уведомления"],
         ["⏸ Пауза", "▶️ Продолжить"]
+    ],
+    "resize_keyboard": True,
+    "one_time_keyboard": False,
+}
+
+CHAT_KEYBOARD = {
+    "keyboard": [
+        ["🚪 Выйти из чата"]
     ],
     "resize_keyboard": True,
     "one_time_keyboard": False,
@@ -105,20 +121,15 @@ def normalize_profile_url(value: str) -> tuple[str, str]:
     )
     match = PROFILE_RE.match(normalized)
     if not match:
-        raise ValueError(
-            "Нужна ссылка вида https://anivox.fun/profile/27788"
-        )
+        raise ValueError("Нужна ссылка вида https://anivox.fun/profile/27788")
     return normalized, match.group(1)
 
-def parse_bool(value: Any, default: bool = False) -> bool:
-    return as_bool(value, default)
-
 def fetch_anime_info(title: str) -> dict[str, Any]:
-    """Запрашивает жанры и ID аниме через открытый API Shikimori (без зависаний)."""
+    """Запрашивает жанры и ID аниме через открытый API Shikimori."""
     if not title or title.lower() in ["неизвестно", "тайтл"]:
         return {"genres": [], "id": ""}
     try:
-        time.sleep(1) # Защита от бана по IP от Shikimori
+        time.sleep(1)
         search_url = f"https://shikimori.one/api/animes?search={urllib.parse.quote(title)}&limit=1"
         req = urllib.request.Request(search_url, headers={"User-Agent": DEFAULT_USER_AGENT})
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -138,10 +149,8 @@ def fetch_anime_info(title: str) -> dict[str, Any]:
         return {"genres": [], "id": ""}
 
 def background_fetch_info(title: str, anime_cache: dict, store_path: Path) -> None:
-    """Фоновая функция для поиска жанров и ID без лагов бота."""
     if title in anime_cache and isinstance(anime_cache[title], dict) and anime_cache[title].get("id"):
         return
-        
     info = fetch_anime_info(title)
     anime_cache[title] = info
     raw = load_json(store_path)
@@ -149,19 +158,57 @@ def background_fetch_info(title: str, anime_cache: dict, store_path: Path) -> No
     save_json(store_path, raw)
 
 def get_anime_data(title: str, cache: dict) -> tuple[str, str]:
-    """Возвращает (строка_жанров, прямая_ссылка_anivox_через_id)"""
     cached = cache.get(title)
     genres_str = "-"
-    link = "https://anivox.fun" # Резервная ссылка, если ничего не найдено
-    
+    link = "https://anivox.fun"
     if isinstance(cached, dict):
         genres_str = ", ".join(cached.get("genres", [])) or "-"
         if cached.get("id"):
             link = f"https://anivox.fun/anime/{cached['id']}"
     elif isinstance(cached, list):
         genres_str = ", ".join(cached) or "-"
-        
     return genres_str, link
+
+# --- ПОИСК СЕРИЙ И ОЗВУЧЕК (Kodik API & AniLibria) ---
+def fetch_anime_release_data(title: str) -> dict[str, int]:
+    """Возвращает словарь: {'Озвучка': номер_последней_серии}."""
+    results: dict[str, int] = {}
+    title_clean = title.strip()
+    if not title_clean:
+        return results
+
+    # 1. Запрос к Kodik
+    try:
+        url = f"https://kodikapi.com/search?token=41f4f585f39e31d4e0e4b85d3a5ca78d&title={urllib.parse.quote(title_clean)}&with_episodes=true"
+        req = urllib.request.Request(url, headers={"User-Agent": DEFAULT_USER_AGENT})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            for item in data.get("results", []):
+                trans = item.get("translation", {}).get("title") or "Оригинал"
+                last_ep = item.get("last_episode") or item.get("episodes_count") or 1
+                try:
+                    last_ep_int = int(last_ep)
+                    if trans not in results or last_ep_int > results[trans]:
+                        results[trans] = last_ep_int
+                except (ValueError, TypeError):
+                    continue
+    except Exception as e:
+        logger.debug(f"Ошибка проверки Kodik для '{title}': {e}")
+
+    # 2. Запасной запрос к AniLibria
+    try:
+        al_url = f"https://api.anilibria.tv/v3/title/search?search={urllib.parse.quote(title_clean)}"
+        req = urllib.request.Request(al_url, headers={"User-Agent": DEFAULT_USER_AGENT})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            if data and isinstance(data, list):
+                last_ep = data[0].get("player", {}).get("episodes", {}).get("last", 0)
+                if last_ep:
+                    results["AniLibria"] = max(results.get("AniLibria", 0), int(last_ep))
+    except Exception as e:
+        logger.debug(f"Ошибка проверки AniLibria для '{title}': {e}")
+
+    return results
 
 @dataclass
 class Profile:
@@ -190,14 +237,17 @@ class Store:
     def __init__(self, path: Path) -> None:
         raw = load_json(path)
         self.path = path
-        self.token = str(raw.get("token", "")).strip()
-        self.chat_id = str(raw.get("chat_id", "")).strip()
+        # Считываем токен из файла или системных переменных Render
+        self.token = str(raw.get("token", "")).strip() or os.getenv("BOT_TOKEN", "").strip()
+        self.chat_id = str(raw.get("chat_id", "")).strip() or os.getenv("CHAT_ID", "").strip()
         
-        self.allowed_users: list[str] = raw.get("allowed_users", [])
+        self.allowed_users: list[str] = [str(u) for u in raw.get("allowed_users", [])]
         if self.chat_id and self.chat_id not in self.allowed_users:
             self.allowed_users.append(self.chat_id)
             
         self.anime_cache: dict[str, Any] = raw.get("anime_cache", {})
+        # Подписки на аниме-серии: { "title": {"title": str, "voice": str, "last_ep": int, "users": [str]} }
+        self.anime_subs: dict[str, dict[str, Any]] = raw.get("anime_subs", {})
 
         raw_settings = raw.get("settings", {})
         raw_settings = raw_settings if isinstance(raw_settings, dict) else {}
@@ -236,29 +286,20 @@ class Store:
                         last_error=str(item.get("last_error", "")),
                         last_status=str(item.get("last_status", "")),
                     )
+                    self.profiles[profile.profile_id] = profile
                 except (KeyError, TypeError):
                     continue
-                self.profiles[profile.profile_id] = profile
                 
         self.history: dict[str, list[dict[str, Any]]] = {}
         raw_history = raw.get("history", {})
         if isinstance(raw_history, dict):
             for profile_id, entries in raw_history.items():
                 if isinstance(entries, list):
-                    cleaned_entries = []
+                    cleaned = []
                     for item in entries:
-                        if not isinstance(item, dict):
-                            continue
-                        if not cleaned_entries:
-                            cleaned_entries.append(item)
-                        else:
-                            last_item = cleaned_entries[-1]
-                            if (last_item.get("presence") != item.get("presence") or
-                                last_item.get("nickname") != item.get("nickname") or
-                                last_item.get("level") != item.get("level") or
-                                last_item.get("title") != item.get("title")):
-                                cleaned_entries.append(item)
-                    self.history[str(profile_id)] = cleaned_entries[-500:]
+                        if isinstance(item, dict):
+                            cleaned.append(item)
+                    self.history[str(profile_id)] = cleaned[-500:]
 
     def save(self) -> None:
         save_json(
@@ -268,54 +309,41 @@ class Store:
                 "chat_id": self.chat_id,
                 "allowed_users": self.allowed_users,
                 "anime_cache": self.anime_cache,
+                "anime_subs": self.anime_subs,
                 "settings": asdict(self.settings),
                 "profiles": [asdict(p) for p in self.profiles.values()],
                 "history": self.history,
             },
         )
 
-    def add_history(
-        self,
-        profile_id: str,
-        result: "FetchResult",
-        changes: list[str],
-    ) -> None:
-        if not result.ok:
+    def add_history(self, profile_id: str, result: "FetchResult", changes: list[str]) -> None:
+        if not result.ok or not changes:
             return
-            
-        if not changes:
-            return
-
         entries = self.history.setdefault(profile_id, [])
         if entries:
-            last_entry = entries[-1]
-            if (last_entry.get("presence") == result.presence and 
-                last_entry.get("nickname") == result.nickname and 
-                last_entry.get("level") == result.level and
-                last_entry.get("title") == result.title):
+            last = entries[-1]
+            if (last.get("presence") == result.presence and 
+                last.get("nickname") == result.nickname and 
+                last.get("level") == result.level and
+                last.get("title") == result.title):
                 return
 
-        # Запускаем фоновый поиск ID, если тайтла нет в кэше
         if result.title:
             cached = self.anime_cache.get(result.title)
-            if not cached or (isinstance(cached, dict) and not cached.get("id")) or isinstance(cached, list):
-                if not isinstance(cached, dict):
-                    self.anime_cache[result.title] = {"genres": [], "id": ""}
+            if not cached or (isinstance(cached, dict) and not cached.get("id")):
                 threading.Thread(target=background_fetch_info, args=(result.title, self.anime_cache, self.path), daemon=True).start()
 
-        entries.append(
-            {
-                "checked_at": result.checked_at,
-                "ok": result.ok,
-                "nickname": result.nickname,
-                "level": result.level,
-                "presence": result.presence,
-                "title": result.title,
-                "signature": result.signature,
-                "changes": changes,
-                "error": result.error,
-            }
-        )
+        entries.append({
+            "checked_at": result.checked_at,
+            "ok": result.ok,
+            "nickname": result.nickname,
+            "level": result.level,
+            "presence": result.presence,
+            "title": result.title,
+            "signature": result.signature,
+            "changes": changes,
+            "error": result.error,
+        })
         self.history[profile_id] = entries[-500:]
 
 class TelegramError(RuntimeError):
@@ -342,20 +370,14 @@ class TelegramClient:
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
             raise TelegramError(f"HTTP {exc.code}: {detail[:300]}") from exc
-        except (urllib.error.URLError, TimeoutError, OSError, ConnectionError) as exc:
-            raise TelegramError(f"Network error (Telegram): {exc}") from exc
+        except Exception as exc:
+            raise TelegramError(f"Network error: {exc}") from exc
             
         if not result.get("ok"):
             raise TelegramError(str(result.get("description", "ошибка Telegram")))
         return result.get("result")
 
-    def get_me(self) -> dict[str, Any]:
-        result = self.request("getMe")
-        return result if isinstance(result, dict) else {}
-
-    def send_message(
-        self, chat_id: str, text: str, reply_markup: Optional[dict[str, Any]] = None
-    ) -> None:
+    def send_message(self, chat_id: str, text: str, reply_markup: Optional[dict[str, Any]] = None) -> None:
         self.request(
             "sendMessage",
             {
@@ -363,31 +385,9 @@ class TelegramClient:
                 "text": text[:4096],
                 "parse_mode": "HTML",
                 "disable_web_page_preview": "true",
-                "reply_markup": json.dumps(
-                    reply_markup or TELEGRAM_KEYBOARD, ensure_ascii=False
-                ),
+                "reply_markup": json.dumps(reply_markup or TELEGRAM_KEYBOARD, ensure_ascii=False),
             },
         )
-
-    def edit_message_text(
-        self, chat_id: str, text: str, message_id: int, reply_markup: Optional[dict[str, Any]] = None
-    ) -> None:
-        self.request(
-            "editMessageText",
-            {
-                "chat_id": chat_id,
-                "message_id": message_id,
-                "text": text[:4096],
-                "parse_mode": "HTML",
-                "reply_markup": json.dumps(reply_markup, ensure_ascii=False) if reply_markup else ""
-            },
-        )
-
-    def answer_callback_query(self, callback_query_id: str, text: str = "") -> None:
-        try:
-            self.request("answerCallbackQuery", {"callback_query_id": callback_query_id, "text": text})
-        except Exception:
-            pass
 
     def send_document(self, chat_id: str, path: Path, caption: str = "") -> None:
         boundary = f"----AniVoxMonitor{os.urandom(8).hex()}"
@@ -395,51 +395,38 @@ class TelegramClient:
         parts: list[bytes] = []
 
         def field(name: str, value: str) -> None:
-            parts.extend(
-                [
-                    f"--{boundary}\r\n".encode(),
-                    f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode(),
-                    value.encode("utf-8"),
-                    b"\r\n",
-                ]
-            )
+            parts.extend([
+                f"--{boundary}\r\n".encode(),
+                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode(),
+                value.encode("utf-8"),
+                b"\r\n",
+            ])
 
         field("chat_id", chat_id)
         if caption:
             field("caption", caption[:1024])
             
-        content_type = b"Content-Type: text/html\r\n\r\n" if path.name.endswith(".html") else b"Content-Type: application/json\r\n\r\n"
-        
-        parts.extend(
-            [
-                f"--{boundary}\r\n".encode(),
-                (
-                    'Content-Disposition: form-data; name="document"; '
-                    f'filename="{path.name}"\r\n'
-                ).encode(),
-                content_type,
-                file_bytes,
-                b"\r\n",
-                f"--{boundary}--\r\n".encode(),
-            ]
-        )
+        parts.extend([
+            f"--{boundary}\r\n".encode(),
+            f'Content-Disposition: form-data; name="document"; filename="{path.name}"\r\n'.encode(),
+            b"Content-Type: text/html\r\n\r\n" if path.name.endswith(".html") else b"Content-Type: application/json\r\n\r\n",
+            file_bytes,
+            b"\r\n",
+            f"--{boundary}--\r\n".encode(),
+        ])
         request = urllib.request.Request(
             self.base_url + "sendDocument",
             data=b"".join(parts),
-            headers={
-                "Content-Type": f"multipart/form-data; boundary={boundary}",
-                "User-Agent": f"{APP_NAME}/{VERSION}",
-            },
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}", "User-Agent": f"{APP_NAME}/{VERSION}"},
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                result = json.loads(response.read().decode("utf-8"))
-        except (urllib.error.URLError, urllib.error.HTTPError, OSError) as exc:
-            err_details = exc.read().decode() if isinstance(exc, urllib.error.HTTPError) else str(exc)
-            raise TelegramError(f"не удалось отправить файл: {err_details}") from exc
-        if not result.get("ok"):
-            raise TelegramError(str(result.get("description", "ошибка отправки файла")))
+            with urllib.request.urlopen(request, timeout=self.timeout) as resp:
+                res = json.loads(resp.read().decode("utf-8"))
+                if not res.get("ok"):
+                    raise TelegramError(res.get("description"))
+        except Exception as exc:
+            raise TelegramError(f"Ошибка отправки файла: {exc}") from exc
 
     def get_updates(self, timeout: int = 5) -> list[dict[str, Any]]:
         result = self.request(
@@ -490,9 +477,7 @@ class FetchResult:
             state = "online"
         else:
             state = "offline"
-        return "|".join(
-            (self.nickname.lower(), self.level, state, self.title.lower())
-        ).lower()
+        return "|".join((self.nickname.lower(), self.level, state, self.title.lower())).lower()
 
 def recv_exact(sock: socket.socket, length: int) -> bytes:
     chunks: list[bytes] = []
@@ -535,9 +520,8 @@ def ws_read_message(sock: socket.socket) -> Optional[str]:
             data = bytes(byte ^ mask[i % 4] for i, byte in enumerate(data))
         if opcode == 8:
             return None
-        if opcode == 9:  # ping
-            pong = bytes((0x8A, len(data))) + data
-            sock.sendall(pong)
+        if opcode == 9:
+            sock.sendall(bytes((0x8A, len(data))) + data)
             continue
         if opcode == 10:
             continue
@@ -546,9 +530,7 @@ def ws_read_message(sock: socket.socket) -> Optional[str]:
             if header[0] & 0x80:
                 return b"".join(fragments).decode("utf-8", errors="replace")
 
-def anivox_websocket_profile(
-    profile_id: str, timeout: int = 20
-) -> dict[str, Any]:
+def anivox_websocket_profile(profile_id: str, timeout: int = 20) -> dict[str, Any]:
     host = "anivox.fun"
     raw_socket = socket.create_connection((host, 443), timeout=timeout)
     context = ssl.create_default_context()
@@ -571,11 +553,10 @@ def anivox_websocket_profile(
         while b"\r\n\r\n" not in response:
             response += sock.recv(4096)
             if len(response) > 65536:
-                raise ConnectionError("слишком длинный WebSocket handshake")
+                raise ConnectionError("слишком длинный handshake")
         header_text = response.decode("latin1", errors="replace")
-        status_line = header_text.splitlines()[0] if header_text else ""
-        if " 101 " not in status_line:
-            raise ConnectionError(f"AniVox WebSocket: {status_line}")
+        if " 101 " not in header_text.splitlines()[0]:
+            raise ConnectionError(f"AniVox WS отказ: {header_text.splitlines()[0]}")
         ws_send_text(sock, {"type": "get_profile", "id": int(profile_id)})
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -584,11 +565,11 @@ def anivox_websocket_profile(
                 continue
             try:
                 data = json.loads(message)
+                if data.get("type") == "get_profile":
+                    return data
             except json.JSONDecodeError:
                 continue
-            if data.get("type") == "get_profile":
-                return data
-        raise TimeoutError("AniVox не прислал ответ get_profile")
+        raise TimeoutError("AniVox не ответил get_profile")
     finally:
         try:
             sock.close()
@@ -608,21 +589,15 @@ def format_last_seen(timestamp: float) -> str:
         relative = f"{age // 3600} ч. назад"
     else:
         relative = f"{age // 86400} дн. назад"
-    return f"Был в сети: {relative} ({dt.strftime('%H:%M Алматы')})"
+    return f"Был в сети: {relative} ({dt.strftime('%H:%M')})"
 
 def result_from_ws(data: dict[str, Any], profile_id: str, url: str) -> FetchResult:
     if not isinstance(data, dict):
-        return FetchResult(
-            False, profile_id, url,
-            error="AniVox ответил некорректным форматом данных",
-        )
+        return FetchResult(False, profile_id, url, error="Некорректный ответ AniVox")
     container = data.get("data")
     user = container.get("user") if isinstance(container, dict) else None
     if not isinstance(user, dict):
-        return FetchResult(
-            False, profile_id, url,
-            error="AniVox ответил без объекта data.user",
-        )
+        return FetchResult(False, profile_id, url, error="Нет объекта data.user")
     online_value = user.get("online", 0)
     try:
         online_timestamp = float(online_value or 0)
@@ -630,25 +605,14 @@ def result_from_ws(data: dict[str, Any], profile_id: str, url: str) -> FetchResu
         online_timestamp = 0
     online_status = container.get("online_status", "")
     if online_timestamp == 0:
-        title = ""
-        if isinstance(online_status, dict):
-            title = compact(online_status.get("text", ""))
-        else:
-            title = compact(online_status)
-        title = re.sub(
-            r"^(?:смотрит|watching)\s*[:：-]?\s*",
-            "",
-            title,
-            flags=re.IGNORECASE,
-        ).strip()
+        title = compact(online_status.get("text", "") if isinstance(online_status, dict) else online_status)
+        title = re.sub(r"^(?:смотрит|watching)\s*[:：-]?\s*", "", title, flags=re.IGNORECASE).strip()
         presence = f"Смотрит: {title}" if title else "Онлайн"
     else:
         title = ""
         presence = format_last_seen(online_timestamp)
     return FetchResult(
-        True,
-        profile_id,
-        url,
+        True, profile_id, url,
         nickname=compact(user.get("username")) or "неизвестно",
         level=str(user.get("level", "неизвестно")),
         presence=presence,
@@ -660,13 +624,8 @@ def fetch_profile(profile: Profile, timeout: int = 20) -> FetchResult:
     try:
         data = anivox_websocket_profile(profile.profile_id, timeout)
         return result_from_ws(data, profile.profile_id, profile.url)
-    except (ConnectionError, OSError, TimeoutError, ValueError, json.JSONDecodeError) as exc:
-        return FetchResult(
-            False,
-            profile.profile_id,
-            profile.url,
-            error=f"не удалось получить данные через AniVox WebSocket: {exc}",
-        )
+    except Exception as exc:
+        return FetchResult(False, profile.profile_id, profile.url, error=str(exc))
 
 def format_profile(result: FetchResult, cache: dict, label: str = "") -> str:
     name = html.escape(result.nickname + (f" ({label})" if label else ""))
@@ -674,7 +633,6 @@ def format_profile(result: FetchResult, cache: dict, label: str = "") -> str:
         f"<b>👤 Профиль:</b> {name}",
         f"<b>⭐ Лвл:</b> {html.escape(str(result.level))}",
     ]
-    
     if result.presence.startswith("Смотрит:"):
         escaped_title = html.escape(result.title)
         _, link = get_anime_data(result.title, cache)
@@ -682,94 +640,53 @@ def format_profile(result: FetchResult, cache: dict, label: str = "") -> str:
     else:
         status_ico = "🟢" if result.presence.startswith("Онлайн") else "🔴"
         lines.append(f"{status_ico} <b>Статус:</b> {html.escape(result.presence)}")
-        
     try:
         dt = datetime.fromisoformat(result.checked_at).strftime('%H:%M')
-    except:
+    except Exception:
         dt = result.checked_at
-        
     lines.extend([
         f"<i>⏱ Проверено: {dt} (Алматы)</i>",
         f"<a href='{result.url}'>🌐 Открыть профиль</a>"
     ])
     return "\n".join(lines)
 
-def calc_stats(entries: list[dict], anime_cache: dict) -> tuple[float, float, float, dict, dict]:
-    w_time = 0.0
-    on_time = 0.0
-    off_time = 0.0
-    titles = {}
-    genres_time = {}
-    now = datetime.now(almaty_tz()).timestamp()
-
-    for i in range(len(entries)):
-        curr = entries[i]
-        try:
-            t1 = datetime.fromisoformat(curr["checked_at"]).timestamp()
-            t2 = datetime.fromisoformat(entries[i+1]["checked_at"]).timestamp() if i + 1 < len(entries) else now
-            dur_hours = max(0, (t2 - t1) / 3600.0)
-            pres = curr.get("presence", "")
-
-            if "Смотрит" in pres:
-                w_time += dur_hours
-                t = curr.get("title", "Неизвестно")
-                titles[t] = titles.get(t, 0) + dur_hours
-                
-                cached = anime_cache.get(t)
-                g_list = cached.get("genres", []) if isinstance(cached, dict) else (cached if isinstance(cached, list) else [])
-                for genre in g_list:
-                    genres_time[genre] = genres_time.get(genre, 0) + dur_hours
-                    
-            elif "Онлайн" in pres:
-                on_time += dur_hours
-            else:
-                off_time += dur_hours
-        except (ValueError, TypeError):
-            continue
-            
-    return round(w_time, 1), round(on_time, 1), round(off_time, 1), titles, genres_time
-
 def changed_fields(old: str, result: FetchResult) -> list[str]:
     if not old:
         return ["новый профиль"]
-    previous = old.split("|")
-    current = result.signature.split("|")
-    previous += [""] * (4 - len(previous))
-    current += [""] * (4 - len(current))
-    changes: list[str] = []
-    if previous[0] != current[0]:
-        changes.append("ник")
-    if previous[1] != current[1]:
-        changes.append("уровень")
-    old_state, new_state = previous[2], current[2]
-    if old_state != new_state:
-        changes.append("статус")
-    if (
-        old_state.startswith("watching:")
-        and new_state.startswith("watching:")
-        and previous[3] != current[3]
-    ):
+    previous = (old.split("|") + [""] * 4)[:4]
+    current = (result.signature.split("|") + [""] * 4)[:4]
+    changes = []
+    if previous[0] != current[0]: changes.append("ник")
+    if previous[1] != current[1]: changes.append("уровень")
+    if previous[2] != current[2]: changes.append("статус")
+    if previous[2].startswith("watching:") and current[2].startswith("watching:") and previous[3] != current[3]:
         changes.append("тайтл")
     return changes
 
+# --- WEB СЕРВЕР ДЛЯ RENDER (Слушает PORT и отдает отчет) ---
 class QuietHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
-    """Скрывает назойливые логи локального сервера."""
+    def do_GET(self):
+        # На Render любой заход на корень / отдает anivox_report.html
+        if self.path in ("/", "/index.html"):
+            self.path = "/anivox_report.html"
+        return super().do_GET()
+
     def log_message(self, format, *args):
         pass
 
 def run_web_server():
-    """Запускает веб-сервер в директории со скриптом."""
     port = int(os.getenv("PORT", 15887))
     work_dir = os.path.dirname(os.path.abspath(CONFIG_PATH))
     os.chdir(work_dir)
     try:
         socketserver.TCPServer.allow_reuse_address = True
-        with socketserver.TCPServer(("", port), QuietHTTPRequestHandler) as httpd:
-            logger.info(f"Web-сервер запущен на порту {port}")
+        with socketserver.TCPServer(("0.0.0.0", port), QuietHTTPRequestHandler) as httpd:
+            logger.info(f"Web-сервер запущен: порт {port} (0.0.0.0)")
             httpd.serve_forever()
     except Exception as e:
         logger.error(f"Ошибка запуска Web-сервера: {e}")
 
+# --- КЛАСС МОНИТОРА ---
 class Monitor:
     def __init__(self, store: Store, telegram: TelegramClient) -> None:
         self.store = store
@@ -777,31 +694,35 @@ class Monitor:
         self.stop_event = threading.Event()
         self.paused = False
         self.check_lock = threading.RLock()
-        self.check_requested = threading.Event()
+        self.user_states: dict[str, str] = {} # Состояния (чат, добавление аниме и т.д.)
 
     def stop(self, *_args: Any) -> None:
         self.stop_event.set()
 
-    def allowed_notification(self, old: str, result: FetchResult) -> bool:
-        settings = self.store.settings
-        fields = changed_fields(old, result)
-        if not old or not settings.notify_on_change:
-            return bool(not old and settings.notify_on_change)
-        if "статус" in fields:
-            online = result.presence.startswith(("Онлайн", "Смотрит"))
-            if online and not settings.notify_on_online:
-                fields.remove("статус")
-            if not online and not settings.notify_on_offline:
-                fields.remove("статус")
-        if "тайтл" in fields and not settings.notify_on_title:
-            fields.remove("тайтл")
-        return bool(fields)
+    # ФУНКЦИЯ ШПИОНА: Уведомляет владельца о ЛЮБЫХ действиях других пользователей
+    def notify_owner_spy(self, user_info: dict, action_desc: str) -> None:
+        if not self.store.chat_id:
+            return
+        uid = str(user_info.get("id", ""))
+        # Не спамим владельцу о его собственных действиях
+        if uid == str(self.store.chat_id):
+            return
+            
+        first_name = user_info.get("first_name", "Без имени")
+        username = f"@{user_info.get('username')}" if user_info.get("username") else "нет юзернейма"
+        text = (
+            f"👁 <b>[Шпион] Действие пользователя:</b>\n"
+            f"👤 <b>Кто:</b> {html.escape(first_name)} ({username})\n"
+            f"🆔 <b>ID:</b> <code>{uid}</code>\n"
+            f"⚡ <b>Сделал:</b> {html.escape(action_desc)}"
+        )
+        try:
+            self.telegram.send_message(self.store.chat_id, text)
+        except Exception:
+            pass
 
     def check_one(self, profile: Profile, announce: bool) -> FetchResult:
-        # АРХИТЕКТУРА АНТИ-ФРИЗ: Сетевой запрос выполняется ВНЕ блокировки
         result = fetch_profile(profile, self.store.settings.request_timeout)
-        
-        # Только обновление внутренних данных защищено потоковым замком
         with self.check_lock:
             profile.last_check = result.checked_at
             old_signature = profile.last_signature
@@ -811,28 +732,15 @@ class Monitor:
             self.store.add_history(profile.profile_id, result, changes)
             
             if result.ok:
-                if announce and self.allowed_notification(old_signature, result):
-                    prefix = ""
-                    if old_signature:
-                        prefix = "<b>🔔 Изменение:</b> " + ", ".join(changes) + "\n\n"
-                    msg_text = prefix + format_profile(result, self.store.anime_cache, profile.label)
-                    
+                if announce and old_signature and changes:
+                    msg_text = "<b>🔔 Изменение:</b> " + ", ".join(changes) + "\n\n" + format_profile(result, self.store.anime_cache, profile.label)
                     for uid in self.store.allowed_users:
                         try:
                             self.telegram.send_message(uid, msg_text)
                         except TelegramError as exc:
-                            logger.warning("Telegram notification failed for %s: %s", uid, exc)
-                            
+                            logger.warning("Notification failed for %s: %s", uid, exc)
                 profile.last_signature = result.signature
                 profile.last_status = result.presence
-                
-            elif announce and self.store.settings.notify_on_errors:
-                err_msg = f"⚠️ <b>Ошибка проверки {html.escape(profile.url)}</b>\n{html.escape(result.error)}"
-                for uid in self.store.allowed_users:
-                    try:
-                        self.telegram.send_message(uid, err_msg)
-                    except TelegramError as exc:
-                        logger.warning("Telegram error notification failed for %s: %s", uid, exc)
             self.store.save()
             return result
 
@@ -842,149 +750,398 @@ class Monitor:
             if self.stop_event.is_set():
                 break
             results.append(self.check_one(profile, announce))
+        self.generate_html_report()
         return results
 
-    def history_text(self, args: str) -> str:
-        parts = args.split()
-        profile_id = parts[0] if parts and parts[0].isdigit() else ""
-        try:
-            limit = int(parts[1] if profile_id and len(parts) > 1 else parts[0]) if parts else 15
-        except ValueError:
-            limit = 15
-        limit = max(1, min(30, limit))
-        profile_ids = [profile_id] if profile_id else list(self.store.profiles)
-        blocks: list[str] = []
-        
-        p_idx = 1
-        for current_id in profile_ids:
-            profile = self.store.profiles.get(current_id)
-            entries = self.store.history.get(current_id, [])
+    # ПРОВЕРКА ВЫХОДА СЕРИЙ АНИМЕ В ОЗВУЧКЕ
+    def check_anime_updates(self) -> None:
+        if not self.store.anime_subs:
+            return
+        updated = False
+        for title, sub_info in list(self.store.anime_subs.items()):
+            target_voice = sub_info.get("voice", "").strip().lower()
+            last_known_ep = int(sub_info.get("last_ep", 0))
             
-            title = profile.label if profile and profile.label else current_id
-            
-            try:
-                last_chk_str = datetime.fromisoformat(profile.last_check).strftime("%d.%m %H:%M:%S") if profile.last_check else "никогда"
-            except:
-                last_chk_str = profile.last_check if profile.last_check else "никогда"
+            data = fetch_anime_release_data(title)
+            if not data:
+                continue
                 
-            rows = [
-                f"👤 <b>{p_idx}. {html.escape(title)}</b> (ID {current_id})",
-                f"🔄 <i>Автопроверка: {html.escape(last_chk_str)}</i>"
-            ]
-            
-            if not entries:
-                rows.append("<i>История пуста</i>")
-            else:
-                hist_idx = 1
-                for entry in entries[-limit:][::-1]:
-                    status = entry.get("presence", "неизвестно")
-                    try:
-                        dt_str = datetime.fromisoformat(entry.get("checked_at", "")).strftime("%d.%m %H:%M")
-                    except:
-                        dt_str = entry.get("checked_at", "?")
-                        
-                    rows.append(f"<b>{hist_idx}.</b> {dt_str} — {html.escape(status)}")
-                    hist_idx += 1
-                    
-            blocks.append("\n".join(rows))
-            p_idx += 1
-            
-        return (
-            "\n\n".join(blocks)[:4000]
-            if blocks
-            else "История пока пуста. Записываются только изменения."
-        )
+            for voice_name, ep_num in data.items():
+                is_match = (not target_voice or target_voice == "любая" or target_voice in voice_name.lower())
+                if is_match and ep_num > last_known_ep:
+                    sub_info["last_ep"] = ep_num
+                    updated = True
+                    alert_text = (
+                        f"🎉 <b>Вышла новая серия аниме!</b>\n\n"
+                        f"🎬 <b>Тайтл:</b> {html.escape(title)}\n"
+                        f"🎞 <b>Серия:</b> {ep_num}\n"
+                        f"🎙 <b>Озвучка:</b> {html.escape(voice_name)}\n"
+                        f"⏱ <i>Обнаружено: {datetime.now(almaty_tz()).strftime('%H:%M')} (Алматы)</i>"
+                    )
+                    for uid in sub_info.get("users", self.store.allowed_users):
+                        try:
+                            self.telegram.send_message(uid, alert_text)
+                        except Exception:
+                            pass
+        if updated:
+            self.store.save()
+            self.generate_html_report()
 
-    def summary_text(self) -> str:
-        if not self.store.profiles:
-            return "Профилей нет. Владелец должен добавить профиль через /add."
-        counts = {"онлайн": 0, "смотрит": 0, "оффлайн": 0, "ошибка": 0}
-        rows = ["🧾 <b>Сводка по пользователям:</b>"]
+    # ГЕНЕРАТОР ПОЛНОГО HTML-САЙТА (ТА САМАЯ ФУНКЦИЯ, КОТОРАЯ БЫЛА ОБОРВАНА)
+    def generate_html_report(self) -> Path:
+        """Создает стильный anivox_report.html с темной темой и автообновлением."""
+        now_str = datetime.now(almaty_tz()).strftime("%d.%m.%Y %H:%M:%S")
+        profiles_html = []
         
-        idx = 1
-        for profile in self.store.profiles.values():
-            status = profile.last_status or "не проверялся"
-            status_lower = status.lower()
-            if not profile.last_ok and profile.last_check:
-                counts["ошибка"] += 1
-            elif status_lower.startswith("смотрит"):
-                counts["смотрит"] += 1
-            elif status_lower.startswith("онлайн"):
-                counts["онлайн"] += 1
-            elif profile.last_check:
-                counts["оффлайн"] += 1
-            history_count = len(self.store.history.get(profile.profile_id, []))
+        for p in self.store.profiles.values():
+            status = p.last_status or "Не проверялся"
+            is_online = "онлайн" in status.lower() or "смотрит" in status.lower()
+            badge_class = "badge-online" if is_online else "badge-offline"
+            history = self.store.history.get(p.profile_id, [])
+            last_entry = history[-1] if history else {}
+            title = last_entry.get("title", "")
             
-            try:
-                dt_str = datetime.fromisoformat(profile.last_check).strftime("%d.%m %H:%M") if profile.last_check else "нет"
-            except:
-                dt_str = profile.last_check
+            hist_rows = ""
+            for h in history[-5:][::-1]:
+                hist_rows += f"<li><span class='time'>{h.get('checked_at','')[11:16]}</span> — {html.escape(h.get('presence',''))}</li>"
                 
-            rows.append(
-                f"<b>{idx}.</b> {html.escape(profile.label or profile.profile_id)}: {html.escape(status)}\n"
-                f"  изменений: {history_count}, последнее: {dt_str}"
-            )
-            idx += 1
-            
-        rows.append(
-            "\nИтого: "
-            f"🟢 онлайн {counts['онлайн']} | "
-            f"🍿 смотрит {counts['смотрит']} | "
-            f"🔴 оффлайн {counts['оффлайн']} | "
-            f"⚠️ ошибки {counts['ошибка']}"
-        )
-        return "\n".join(rows)[:4000]
+            profiles_html.append(f"""
+            <div class="card">
+                <div class="card-header">
+                    <span class="name">{html.escape(p.label or p.profile_id)}</span>
+                    <span class="badge {badge_class}">{html.escape(status)}</span>
+                </div>
+                <div class="card-body">
+                    <p><b>ID профиля:</b> <a href="{p.url}" target="_blank">{p.profile_id}</a></p>
+                    {f'<p class="watching">🍿 Смотрит: <b>{html.escape(title)}</b></p>' if title else ''}
+                    <div class="history">
+                        <b>Последние события:</b>
+                        <ul>{hist_rows or '<li>История пуста</li>'}</ul>
+                    </div>
+                </div>
+            </div>
+            """)
 
-    def search_text(self, query: str) -> str:
-        needle = query.strip().lower()
-        if not needle:
-            return "Пример: /find текст или нажмите 🔍 Поиск."
-        found: list[str] = []
-        for profile in self.store.profiles.values():
-            entries = self.store.history.get(profile.profile_id, [])
-            latest = entries[-1] if entries else {}
-            haystack = " ".join(
-                [
-                    profile.profile_id,
-                    profile.label,
-                    str(latest.get("nickname", "")),
-                    str(latest.get("title", "")),
-                ]
-            ).lower()
-            if needle in haystack:
-                found.append(
-                    f"• {html.escape(latest.get('nickname', profile.label or profile.profile_id))} "
-                    f"(ID {profile.profile_id}) — {html.escape(latest.get('presence', 'не проверялся'))}"
-                )
-        return "\n".join(["Найдено:"] + found) if found else "Ничего не найдено."
+        anime_html = []
+        for a_title, a_data in self.store.anime_subs.items():
+            anime_html.append(f"""
+            <div class="anime-badge">
+                🎬 <b>{html.escape(a_title)}</b> — Серия: <span class="ep-num">{a_data.get('last_ep', '?')}</span> 
+                (Озвучка: <i>{html.escape(a_data.get('voice', 'Любая'))}</i>)
+            </div>
+            """)
 
-    def probe_text(self) -> str:
-        if self.store.profiles:
-            profile = next(iter(self.store.profiles.values()))
-        else:
-            profile = Profile("https://anivox.fun/profile/27788", "27788")
-        started = time.monotonic()
-        result = fetch_profile(profile, self.store.settings.request_timeout)
-        elapsed = time.monotonic() - started
-        if result.ok:
-            return (
-                f"✅ AniVox доступен, WebSocket /api работает.\n"
-                f"Ответ за {elapsed:.1f} сек.\n{format_profile(result, self.store.anime_cache)}"
-            )
-        return f"❌ AniVox не ответил за {elapsed:.1f} сек.\n{html.escape(result.error)}"
+        html_content = f"""<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="refresh" content="30">
+    <title>{APP_NAME} — Отчет</title>
+    <style>
+        :root {{ --bg: #0f172a; --card: #1e293b; --text: #f8fafc; --accent: #38bdf8; --green: #22c55e; --red: #ef4444; }}
+        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: var(--bg); color: var(--text); margin: 0; padding: 20px; }}
+        .container {{ max-width: 900px; margin: 0 auto; }}
+        header {{ text-align: center; margin-bottom: 25px; border-bottom: 1px solid #334155; padding-bottom: 15px; }}
+        h1 {{ color: var(--accent); margin: 0 0 5px 0; font-size: 24px; }}
+        .updated {{ font-size: 13px; color: #94a3b8; }}
+        .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 15px; }}
+        .card {{ background: var(--card); border-radius: 12px; padding: 15px; border: 1px solid #334155; box-shadow: 0 4px 6px rgba(0,0,0,0.2); }}
+        .card-header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }}
+        .name {{ font-weight: bold; font-size: 17px; }}
+        .badge {{ padding: 4px 10px; border-radius: 20px; font-size: 12px; font-weight: bold; }}
+        .badge-online {{ background: rgba(34, 197, 94, 0.2); color: var(--green); border: 1px solid var(--green); }}
+        .badge-offline {{ background: rgba(239, 68, 68, 0.2); color: var(--red); border: 1px solid var(--red); }}
+        .watching {{ color: #fde047; margin: 8px 0; }}
+        .history {{ margin-top: 10px; font-size: 13px; }}
+        .history ul {{ margin: 5px 0; padding-left: 20px; color: #cbd5e1; }}
+        .time {{ color: #94a3b8; font-weight: bold; }}
+        a {{ color: var(--accent); text-decoration: none; }}
+        .section-title {{ margin: 30px 0 15px 0; color: var(--accent); font-size: 19px; }}
+        .anime-badge {{ background: var(--card); padding: 10px 15px; border-radius: 8px; margin-bottom: 8px; border: 1px solid #334155; }}
+        .ep-num {{ color: var(--green); font-weight: bold; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>⚡ AniVox Live Monitor</h1>
+            <div class="updated">Обновлено: {now_str} (Алматы) • Автообновление каждые 30 сек</div>
+        </header>
+
+        <div class="section-title">👥 Отслеживаемые пользователи</div>
+        <div class="grid">
+            {''.join(profiles_html) if profiles_html else '<p>Нет добавленных профилей.</p>'}
+        </div>
+
+        <div class="section-title">🎬 Отслеживание серий аниме</div>
+        <div class="anime-list">
+            {''.join(anime_html) if anime_html else '<p>Тайтлы пока не добавлены (/add_anime).</p>'}
+        </div>
+    </div>
+</body>
+</html>"""
+        REPORT_PATH.write_text(html_content, encoding="utf-8")
+        return REPORT_PATH
 
     def export_history(self, chat_id: str) -> str:
         path = CONFIG_PATH.with_name("anivox_history_export.json")
         payload = {
             "exported_at": almaty_now(),
-            "profiles": [asdict(profile) for profile in self.store.profiles.values()],
+            "profiles": [asdict(p) for p in self.store.profiles.values()],
             "history": self.store.history,
         }
         save_json(path, payload)
         try:
             self.telegram.send_document(chat_id, path, "История AniVox (JSON)")
             return "Экспорт истории отправлен файлом."
-        except TelegramError as exc:
+        except Exception as exc:
             return f"Не удалось отправить экспорт: {exc}"
 
-    def gen
+    # ОБРАБОТЧИК СООБЩЕНИЙ ТЕЛЕГРАМ
+    def handle_message(self, message: dict[str, Any]) -> None:
+        user = message.get("from", {})
+        uid = str(user.get("id", ""))
+        chat_id = str(message.get("chat", {}).get("id", ""))
+        text = compact(message.get("text", ""))
+
+        if not text:
+            return
+
+        # Привязка первого запустившего как владельца
+        if not self.store.chat_id:
+            self.store.chat_id = uid
+            if uid not in self.store.allowed_users:
+                self.store.allowed_users.append(uid)
+            self.store.save()
+            self.telegram.send_message(chat_id, f"👑 Вы назначены владельцем бота! (ID: {uid})")
+
+        # ПРОВЕРКА ДОСТУПА
+        if uid not in self.store.allowed_users:
+            # ШПИОН: оповещаем владельца о попытке доступа
+            self.notify_owner_spy(user, f"Попытка доступа чужого: {text}")
+            self.telegram.send_message(chat_id, "⛔ У вас нет доступа к боту. Обратитесь к владельцу.")
+            return
+
+        # ШПИОН: логируем любое действие для владельца
+        self.notify_owner_spy(user, f"Команда/Кнопка: {text}")
+
+        # РЕЖИМ ЧАТА С ДРУЗЬЯМИ
+        if self.user_states.get(uid) == "chat":
+            if text in ["🚪 Выйти из чата", "/exit"]:
+                self.user_states.pop(uid, None)
+                self.telegram.send_message(chat_id, "🚪 Вы вышли из чата друзей.", reply_markup=TELEGRAM_KEYBOARD)
+                return
+            # Пересылаем сообщение всем друзьям
+            sender_name = user.get("first_name", "Друг")
+            broadcast_text = f"💬 <b>[Чат друзей] {html.escape(sender_name)}:</b>\n{html.escape(text)}"
+            for friend_id in self.store.allowed_users:
+                if friend_id != uid:
+                    try:
+                        self.telegram.send_message(friend_id, broadcast_text)
+                    except Exception:
+                        pass
+            return
+
+        # ОБРАБОТКА ШАГОВЫХ СОСТОЯНИЙ
+        state = self.user_states.get(uid)
+        if state == "await_profile":
+            try:
+                norm_url, p_id = normalize_profile_url(text)
+                self.store.profiles[p_id] = Profile(url=norm_url, profile_id=p_id, label=p_id)
+                self.store.save()
+                self.user_states.pop(uid, None)
+                self.telegram.send_message(chat_id, f"✅ Профиль {p_id} успешно добавлен!", reply_markup=TELEGRAM_KEYBOARD)
+                self.check_all(announce=False)
+            except Exception as e:
+                self.telegram.send_message(chat_id, f"❌ Ошибка ссылки: {e}. Попробуйте еще раз или /cancel.")
+            return
+
+        elif state == "await_anime":
+            # Формат: Название | Озвучка (или просто Название)
+            parts = [p.strip() for p in text.split("|")]
+            title = parts[0]
+            voice = parts[1] if len(parts) > 1 else "Любая"
+            self.store.anime_subs[title] = {"title": title, "voice": voice, "last_ep": 0, "users": [uid]}
+            self.store.save()
+            self.user_states.pop(uid, None)
+            self.telegram.send_message(chat_id, f"✅ Тайтл <b>{html.escape(title)}</b> добавлен в трекер!\nОзвучка: <i>{html.escape(voice)}</i>", reply_markup=TELEGRAM_KEYBOARD)
+            threading.Thread(target=self.check_anime_updates, daemon=True).start()
+            return
+
+        # ОСНОВНОЕ МЕНЮ И КНОПКИ
+        if text in ["/start", "меню"]:
+            self.telegram.send_message(
+                chat_id,
+                f"👋 <b>Привет! Я AniVox Monitor v{VERSION}</b>\n\n"
+                "• Мониторинг профилей AniVox 24/7\n"
+                "• Отслеживание выхода новых серий в озвучке\n"
+                "• Общий чат для друзей\n"
+                "• Онлайн веб-отчет",
+                reply_markup=TELEGRAM_KEYBOARD
+            )
+
+        elif text in ["📊 Проверить всех", "/check"]:
+            self.telegram.send_message(chat_id, "⏳ Начинаю проверку профилей...")
+            threading.Thread(target=self.check_all, args=(True,), daemon=True).start()
+
+        elif text in ["🌐 Открыть сайт-отчет", "/site"]:
+            self.generate_html_report()
+            host_render = os.getenv("RENDER_EXTERNAL_URL", "")
+            port = os.getenv("PORT", "15887")
+            link = f"{host_render}/anivox_report.html" if host_render else f"http://0.0.0.0:{port}/anivox_report.html"
+            self.telegram.send_message(chat_id, f"🌐 <b>Ваш веб-отчет доступен по ссылке:</b>\n{link}")
+
+        elif text in ["👥 Мои профили", "🎭 Друзья"]:
+            if not self.store.profiles:
+                self.telegram.send_message(chat_id, "Список профилей пуст. Нажмите «➕ Добавить».")
+            else:
+                lines = ["<b>👥 Отслеживаемые профили:</b>\n"]
+                for p in self.store.profiles.values():
+                    lines.append(f"• <b>{html.escape(p.label or p.profile_id)}</b> — {html.escape(p.last_status or 'не проверялся')} (<a href='{p.url}'>ссылка</a>)")
+                self.telegram.send_message(chat_id, "\n".join(lines))
+
+        elif text in ["➕ Добавить", "/add"]:
+            self.user_states[uid] = "await_profile"
+            self.telegram.send_message(chat_id, "Отправьте ссылку на профиль AniVox (например, https://anivox.fun/profile/27788):")
+
+        elif text in ["🗑 Удалить", "/del"]:
+            if not self.store.profiles:
+                self.telegram.send_message(chat_id, "Список пуст.")
+            else:
+                msg = "Чтобы удалить профиль, напишите <code>/remove ID</code>\nДоступные ID:\n" + ", ".join(self.store.profiles.keys())
+                self.telegram.send_message(chat_id, msg)
+
+        elif text.startswith("/remove "):
+            p_id = text.split(maxsplit=1)[1].strip()
+            if p_id in self.store.profiles:
+                del self.store.profiles[p_id]
+                self.store.save()
+                self.telegram.send_message(chat_id, f"✅ Профиль {p_id} удален.")
+            else:
+                self.telegram.send_message(chat_id, "❌ Профиль с таким ID не найден.")
+
+        # РАЗДЕЛ ТРЕКЕРА АНИМЕ
+        elif text in ["🎬 Аниме трекер", "/anime"]:
+            sub_list = []
+            for t, d in self.store.anime_subs.items():
+                sub_list.append(f"• <b>{html.escape(t)}</b> | Серия: <b>{d.get('last_ep', 0)}</b> | Озвучка: <i>{html.escape(d.get('voice', 'Любая'))}</i>")
+            msg = (
+                "🎬 <b>Трекер выхода серий и озвучек:</b>\n\n"
+                + ("\n".join(sub_list) if sub_list else "Список пуст.\n")
+                + "\n\nКоманды:\n"
+                "➕ <code>/add_anime Название | Озвучка</code> — добавить тайтл\n"
+                "🗑 <code>/del_anime Название</code> — удалить тайтл"
+            )
+            self.telegram.send_message(chat_id, msg)
+
+        elif text.startswith("/add_anime "):
+            raw_arg = text[11:].strip()
+            parts = [p.strip() for p in raw_arg.split("|")]
+            t_name = parts[0]
+            v_name = parts[1] if len(parts) > 1 else "Любая"
+            self.store.anime_subs[t_name] = {"title": t_name, "voice": v_name, "last_ep": 0, "users": [uid]}
+            self.store.save()
+            self.telegram.send_message(chat_id, f"✅ Аниме <b>{html.escape(t_name)}</b> добавлено в мониторинг (Озвучка: {html.escape(v_name)})!")
+            threading.Thread(target=self.check_anime_updates, daemon=True).start()
+
+        elif text.startswith("/del_anime "):
+            t_name = text[11:].strip()
+            if t_name in self.store.anime_subs:
+                del self.store.anime_subs[t_name]
+                self.store.save()
+                self.telegram.send_message(chat_id, f"✅ Аниме <b>{html.escape(t_name)}</b> удалено из трекера.")
+            else:
+                self.telegram.send_message(chat_id, "❌ Тайтл не найден.")
+
+        # РАЗДЕЛ ЧАТА ДРУЗЕЙ
+        elif text in ["💬 Чат друзей", "/chat"]:
+            self.user_states[uid] = "chat"
+            self.telegram.send_message(
+                chat_id,
+                "💬 <b>Вы вошли в чат друзей!</b>\n"
+                "Все ваши последующие сообщения будут отправляться всем добавленным друзьям.\n"
+                "Нажмите «🚪 Выйти из чата», когда закончите.",
+                reply_markup=CHAT_KEYBOARD
+            )
+
+        elif text in ["📈 История", "/history"]:
+            self.telegram.send_message(chat_id, self.export_history(chat_id))
+
+        elif text in ["⚙️ Настройки", "🔕 Уведомления"]:
+            s = self.store.settings
+            s.notify_on_change = not s.notify_on_change
+            self.store.save()
+            st = "ВКЛЮЧЕНЫ 🔔" if s.notify_on_change else "ВЫКЛЮЧЕНЫ 🔕"
+            self.telegram.send_message(chat_id, f"Уведомления об изменениях: <b>{st}</b>")
+
+        elif text in ["⏸ Пауза"]:
+            self.paused = True
+            self.telegram.send_message(chat_id, "⏸ Мониторинг поставлен на паузу.")
+
+        elif text in ["▶️ Продолжить"]:
+            self.paused = False
+            self.telegram.send_message(chat_id, "▶️ Мониторинг возобновлен.")
+
+        elif text in ["/cancel", "отмена"]:
+            self.user_states.pop(uid, None)
+            self.telegram.send_message(chat_id, "Действие отменено.", reply_markup=TELEGRAM_KEYBOARD)
+
+    # ФОНОВЫЙ ЦИКЛ ОПРОСА TELEGRAM И ПРОВЕРОК
+    def run(self) -> None:
+        logger.info("Запуск Telegram Polling и планировщика...")
+        last_check_time = 0.0
+        last_anime_check = 0.0
+        
+        # Первичная генерация страницы
+        self.generate_html_report()
+
+        while not self.stop_event.is_set():
+            now = time.time()
+            # 1. Фоновая проверка профилей AniVox по таймеру
+            if not self.paused and (now - last_check_time >= self.store.settings.interval_minutes * 60):
+                last_check_time = now
+                threading.Thread(target=self.check_all, args=(True,), daemon=True).start()
+
+            # 2. Фоновая проверка выхода новых серий раз в 10 минут
+            if now - last_anime_check >= 600:
+                last_anime_check = now
+                threading.Thread(target=self.check_anime_updates, daemon=True).start()
+
+            # 3. Прием команд из Telegram
+            try:
+                updates = self.telegram.get_updates(timeout=2)
+                for update in updates:
+                    if "message" in update:
+                        self.handle_message(update["message"])
+            except Exception as e:
+                logger.debug("Telegram Polling exception: %s", e)
+                time.sleep(1)
+
+            time.sleep(0.5)
+
+def main():
+    store = Store(CONFIG_PATH)
+    if not store.token:
+        logger.error("ОШИБКА: Токен бота не задан в конфиге или BOT_TOKEN!")
+        sys.exit(1)
+
+    # 1. Запуск веб-сервера в отдельном потоке (для Render)
+    web_thread = threading.Thread(target=run_web_server, daemon=True)
+    web_thread.start()
+
+    # 2. Запуск логики бота
+    telegram = TelegramClient(store.token)
+    monitor = Monitor(store, telegram)
+
+    def sig_handler(sig, frame):
+        monitor.stop()
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, sig_handler)
+    signal.signal(signal.SIGTERM, sig_handler)
+
+    monitor.run()
+
+if __name__ == "__main__":
+    main()
