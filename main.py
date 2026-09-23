@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""AniVox Monitor v5.0.0 (Original Chart Dashboard + Smart Voice Search)."""
+"""AniVox Monitor v6.0.0 (Original Polar Chart Dashboard + Smart Voice Search & Spy)."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 APP_NAME = "AniVox Monitor"
-VERSION = "5.0.0"
+VERSION = "6.0.0"
 CONFIG_PATH = Path(__file__).with_name("anivox_monitor.json")
 LOG_PATH = Path(__file__).with_name("anivox_monitor.log")
 REPORT_PATH = Path(__file__).with_name("anivox_report.html")
@@ -71,6 +71,17 @@ def load_json(path: Path) -> dict[str, Any]:
     if not path.exists(): return {}
     try: return json.loads(path.read_text(encoding="utf-8"))
     except: return {}
+
+def normalize_profile_url(value: str) -> tuple[str, str]:
+    candidate = value.strip()
+    if not candidate.startswith(("http://", "https://")):
+        candidate = "https://" + candidate
+    parsed = urllib.parse.urlparse(candidate)
+    normalized = urllib.parse.urlunparse(("https", parsed.netloc.lower(), parsed.path.rstrip("/"), "", "", ""))
+    match = PROFILE_RE.match(normalized)
+    if not match:
+        raise ValueError("Нужна ссылка вида https://anivox.fun/profile/27788")
+    return normalized, match.group(1)
 
 @dataclass
 class Profile:
@@ -254,16 +265,20 @@ def changed_fields(old: str, result: FetchResult) -> list[str]:
     if prev[2].startswith("watching:") and curr[2].startswith("watching:") and prev[3] != curr[3]: ch.append("тайтл")
     return ch
 
-# --- ПОИСК ОЗВУЧЕК ---
+# --- УМНЫЙ ПОИСК ОЗВУЧЕК (ANIVOX + SHIKIMORI/KODIK) ---
 def find_anime_voices(anime_id: str) -> tuple[str, dict]:
     title = f"Аниме ID {anime_id}"
     voices = {}
+    
+    # 1. Запрос на Shikimori для жанров и русского названия
     try:
         req_title = urllib.request.Request(f"https://shikimori.one/api/animes/{anime_id}")
-        with urllib.request.urlopen(req_title, timeout=5) as r: title = json.loads(r.read().decode()).get("russian", title)
+        with urllib.request.urlopen(req_title, timeout=5) as r:
+            s_data = json.loads(r.read().decode())
+            title = s_data.get("russian", title)
     except: pass
 
-    # Пытаемся достать озвучки с Anivox
+    # 2. Основной запрос на Anivox
     try:
         req = urllib.request.Request(f"https://anivox.fun/api/anime/{anime_id}", headers={"User-Agent": DEFAULT_USER_AGENT})
         with urllib.request.urlopen(req, timeout=5) as r:
@@ -274,21 +289,44 @@ def find_anime_voices(anime_id: str) -> tuple[str, dict]:
                 if v_name: voices[v_name] = max(voices.get(v_name, 0), int(t.get("episodes_count", 0)))
     except: pass
 
-    # Добиваем через Kodik (надежнее)
-    try:
-        req_v = urllib.request.Request(f"https://kodikapi.com/search?token=41f4f585f39e31d4e0e4b85d3a5ca78d&shikimori_id={anime_id}&with_episodes=true")
-        with urllib.request.urlopen(req_v, timeout=5) as r:
-            for item in json.loads(r.read().decode()).get("results", []):
-                v_name = item.get("translation", {}).get("title")
-                if v_name: voices[v_name] = max(voices.get(v_name, 0), int(item.get("last_episode") or item.get("episodes_count") or 1))
-    except: pass
+    # 3. Доп. запрос на Kodik
+    if not voices:
+        try:
+            req_v = urllib.request.Request(f"https://kodikapi.com/search?token=41f4f585f39e31d4e0e4b85d3a5ca78d&shikimori_id={anime_id}&with_episodes=true")
+            with urllib.request.urlopen(req_v, timeout=5) as r:
+                for item in json.loads(r.read().decode()).get("results", []):
+                    v_name = item.get("translation", {}).get("title")
+                    if v_name: voices[v_name] = max(voices.get(v_name, 0), int(item.get("last_episode") or item.get("episodes_count") or 1))
+        except: pass
 
     return title, voices
 
-# --- РАСЧЕТ СТАТИСТИКИ ДЛЯ ДИАГРАММ ---
-def calc_stats(entries: list) -> tuple[float, float, float, dict]:
+# --- ПОИСК ЖАНРОВ АНИМЕ ЧЕРЕЗ SHIKIMORI ---
+def fetch_genres(title: str, cache: dict) -> list[str]:
+    if title in cache and "genres" in cache[title]: return cache[title]["genres"]
+    genres = []
+    try:
+        search_url = f"https://shikimori.one/api/animes?search={urllib.parse.quote(title)}&limit=1"
+        req = urllib.request.Request(search_url, headers={"User-Agent": DEFAULT_USER_AGENT})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            s_data = json.loads(r.read().decode())
+            if s_data:
+                a_id = s_data[0]["id"]
+                det_url = f"https://shikimori.one/api/animes/{a_id}"
+                req2 = urllib.request.Request(det_url, headers={"User-Agent": DEFAULT_USER_AGENT})
+                with urllib.request.urlopen(req2, timeout=5) as r2:
+                    det = json.loads(r2.read().decode())
+                    genres = [g.get("russian") or g.get("name") for g in det.get("genres", [])]
+    except: pass
+    if title not in cache: cache[title] = {}
+    cache[title]["genres"] = genres
+    return genres
+
+# --- РАСЧЕТ СТАТИСТИКИ (ДЛЯ ОРИГИНАЛЬНЫХ ДИАГРАММ) ---
+def calc_stats(entries: list, cache: dict) -> tuple[float, float, float, dict, dict]:
     w_time, on_time, off_time = 0.0, 0.0, 0.0
     titles = {}
+    genres_time = {}
     now = datetime.now(almaty_tz()).timestamp()
 
     for i in range(len(entries)):
@@ -303,11 +341,16 @@ def calc_stats(entries: list) -> tuple[float, float, float, dict]:
                 w_time += dur_hours
                 t = curr.get("title", "Неизвестно")
                 titles[t] = titles.get(t, 0) + dur_hours
+                
+                g_list = fetch_genres(t, cache)
+                for g in g_list:
+                    genres_time[g] = genres_time.get(g, 0) + dur_hours
+                    
             elif "Онлайн" in pres: on_time += dur_hours
             else: off_time += dur_hours
         except: continue
             
-    return round(w_time, 1), round(on_time, 1), round(off_time, 1), titles
+    return round(w_time, 1), round(on_time, 1), round(off_time, 1), titles, genres_time
 
 # --- ВЕБ-СЕРВЕР ---
 class QuietHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
@@ -335,12 +378,14 @@ class Monitor:
         self.user_states = {}
 
     def notify_spy(self, user: dict, action: str):
+        if not self.store.chat_id: return
         uid = str(user.get("id", ""))
-        if self.store.chat_id and uid != self.store.chat_id:
-            try: self.telegram.send_message(self.store.chat_id, f"👁 <b>Шпион:</b> {user.get('first_name', '')} -> {action}")
-            except: pass
+        if uid == str(self.store.chat_id): return
+        msg = f"👁 <b>Шпион:</b> {html.escape(user.get('first_name', ''))} (<code>{uid}</code>) -> {html.escape(action)}"
+        try: self.telegram.send_message(self.store.chat_id, msg)
+        except: pass
 
-    def check_all(self):
+    def check_all(self, announce: bool = True):
         for profile in list(self.store.profiles.values()):
             if self.stop_event.is_set(): break
             res = fetch_profile(profile)
@@ -350,7 +395,7 @@ class Monitor:
                 profile.last_check, profile.last_ok, profile.last_error = res.checked_at, res.ok, res.error
                 self.store.add_history(profile.profile_id, res, ch)
                 if res.ok:
-                    if old and ch and self.store.notify_on_change:
+                    if announce and old and ch and self.store.notify_on_change:
                         msg = f"🔔 <b>Изменение:</b> {', '.join(ch)}\n👤 <b>{res.nickname}</b> — {res.presence}"
                         for uid in self.store.allowed_users: self.telegram.send_message(uid, msg)
                     profile.last_signature, profile.last_status = res.signature, res.presence
@@ -375,23 +420,31 @@ class Monitor:
             self.store.save()
             self.generate_html_report()
 
-    # --- ВОССТАНОВЛЕННЫЙ ОРИГИНАЛЬНЫЙ САЙТ С ДИАГРАММАМИ (КАК НА СКРИНАХ) ---
+    # --- ВОССТАНОВЛЕННЫЙ ОРИГИНАЛЬНЫЙ САЙТ С КРУГОВЫМ И ПОЛЯРНЫМ ГРАФИКАМИ ---
     def generate_html_report(self):
         now = datetime.now(almaty_tz()).strftime("%d.%m %H:%M")
-        
         js_data = {"profiles": [], "anime": []}
         
         for p in self.store.profiles.values():
             entries = self.store.history.get(p.profile_id, [])
-            w_time, on_time, off_time, titles = calc_stats(entries)
+            w_time, on_time, off_time, titles, genres = calc_stats(entries, self.store.anime_cache)
             
-            top_titles = [{"title": k, "hours": round(v, 1)} for k, v in sorted(titles.items(), key=lambda x: x[1], reverse=True)[:10]]
-            hist_list = [{"time": e.get("checked_at", "")[11:16], "status": e.get("presence", "")} for e in entries[-10:][::-1]]
+            top_titles = []
+            for k, v in sorted(titles.items(), key=lambda x: x[1], reverse=True)[:15]:
+                g_str = ", ".join(self.store.anime_cache.get(k, {}).get("genres", [])) or "-"
+                top_titles.append({"title": k, "genres": g_str, "hours": round(v, 1)})
+                
+            top_genres = [{"genre": k, "hours": round(v, 1)} for k, v in sorted(genres.items(), key=lambda x: x[1], reverse=True)[:6]]
+            
+            hist_list = []
+            for i, e in enumerate(entries[-15:][::-1]):
+                time_str = datetime.fromisoformat(e.get("checked_at", "")).strftime("%d.%m<br>%H:%M") if e.get("checked_at") else ""
+                hist_list.append({"num": i+1, "time": time_str, "status": e.get("presence", "")})
             
             js_data["profiles"].append({
                 "id": p.profile_id, "name": p.label or p.profile_id,
                 "stats": [w_time, on_time, off_time],
-                "top": top_titles, "history": hist_list
+                "top": top_titles, "genres": top_genres, "history": hist_list
             })
             
         for a_id, d in self.store.anime_subs.items():
@@ -408,22 +461,26 @@ class Monitor:
         header {{ display: flex; align-items: center; justify-content: center; gap: 10px; border-bottom: 2px solid #27272a; padding-bottom: 15px; margin-bottom: 15px; }}
         h1 {{ margin: 0; font-size: 20px; color: #fff; }}
         
-        .tabs {{ display: flex; gap: 10px; justify-content: center; margin-bottom: 20px; flex-wrap: wrap; }}
-        .tab-btn {{ background: transparent; color: #a1a1aa; border: none; font-size: 14px; font-weight: bold; cursor: pointer; padding: 10px; border-bottom: 2px solid transparent; }}
-        .tab-btn.active {{ color: #c084fc; border-color: #c084fc; }}
+        .tabs {{ display: flex; gap: 10px; justify-content: center; margin-bottom: 20px; flex-wrap: wrap; border-bottom: 1px solid #c084fc; padding-bottom: 5px; }}
+        .tab-btn {{ background: transparent; color: #a1a1aa; border: none; font-size: 14px; font-weight: bold; cursor: pointer; padding: 10px; }}
+        .tab-btn.active {{ color: #c084fc; border-bottom: 2px solid #c084fc; }}
         .tab-content {{ display: none; }}
         .tab-content.active {{ display: block; }}
         
         .prof-container {{ background: #27272a; border-radius: 12px; padding: 15px; margin-bottom: 20px; }}
-        .stats-grid {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; text-align: center; margin: 15px 0; }}
-        .stat-box {{ background: #3f3f46; padding: 10px; border-radius: 8px; font-size: 12px; }}
-        .stat-val {{ font-size: 18px; font-weight: bold; color: #c084fc; margin-top: 5px; }}
+        .prof-header {{ display: flex; align-items: center; gap: 10px; font-size: 18px; font-weight: bold; margin-bottom: 15px; }}
         
-        .chart-box {{ position: relative; height: 250px; width: 100%; margin: 20px 0; }}
+        .stats-grid {{ display: grid; grid-template-columns: 1fr; gap: 10px; text-align: center; margin-bottom: 20px; }}
+        .stat-box {{ background: #3f3f46; padding: 15px; border-radius: 8px; font-size: 14px; font-weight: bold; }}
+        .stat-val {{ font-size: 20px; font-weight: bold; color: #c084fc; margin-top: 5px; }}
         
-        table {{ width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 15px; }}
-        th {{ background: #c084fc; color: #fff; padding: 10px; text-align: left; }}
-        td {{ padding: 10px; border-bottom: 1px solid #3f3f46; }}
+        .chart-box {{ position: relative; height: 280px; width: 100%; margin: 20px 0; }}
+        
+        table {{ width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 20px; }}
+        th {{ background: #b48ead; color: #fff; padding: 12px; text-align: left; font-size: 14px; }}
+        td {{ padding: 12px; border-bottom: 1px solid #3f3f46; vertical-align: middle; }}
+        .col-id {{ width: 30px; font-weight: bold; }}
+        .col-time {{ width: 80px; color: #a1a1aa; }}
         
         .anime-card {{ background: #27272a; padding: 15px; border-radius: 8px; margin-bottom: 10px; border-left: 4px solid #c084fc; }}
     </style>
@@ -444,7 +501,7 @@ class Monitor:
             const tabs = document.getElementById('user-tabs');
             const area = document.getElementById('content-area');
             
-            // Вкладки пользователей
+            // Вкладки профилей
             data.profiles.forEach((p, i) => {{
                 let btn = document.createElement('button');
                 btn.className = 'tab-btn' + (i===0 ? ' active' : '');
@@ -454,20 +511,26 @@ class Monitor:
                 
                 let html = `<div id="prof-${{i}}" class="tab-content ${{i===0 ? 'active' : ''}}">
                     <div class="prof-container">
-                        <h3>👤 ${{i+1}}. ${{p.name}}</h3>
+                        <div class="prof-header">👤 ${{i+1}}. ${{p.name}}</div>
+                        
                         <div class="stats-grid">
                             <div class="stat-box">В аниме<div class="stat-val">${{p.stats[0]}} ч.</div></div>
                             <div class="stat-box">Онлайн<div class="stat-val">${{p.stats[1]}} ч.</div></div>
                             <div class="stat-box">Оффлайн<div class="stat-val">${{p.stats[2]}} ч.</div></div>
                         </div>
-                        <div class="chart-box"><canvas id="chart-${{i}}"></canvas></div>
                         
-                        <h3>🏆 Топ тайтлов:</h3>
-                        <table><tr><th>Тайтл</th><th>Часы</th></tr>`;
+                        <div class="chart-box"><canvas id="chart-doughnut-${{i}}"></canvas></div>
+                        <div class="chart-box" style="margin-top: 40px;"><canvas id="chart-polar-${{i}}"></canvas></div>
+                        
+                        <h3 style="color:#d8b4e2; margin-top:30px;">🏆 Топ тайтлов:</h3>
+                        <table><tr><th>Тайтл</th><th>Жанры</th><th>Часы</th></tr>`;
                 
-                p.top.forEach(t => {{ html += `<tr><td>${{t.title}}</td><td>${{t.hours}}</td></tr>`; }});
-                html += `</table><h3>📜 История статусов:</h3><table><tr><th>Время</th><th>Статус</th></tr>`;
-                p.history.forEach(h => {{ html += `<tr><td>${{h.time}}</td><td>${{h.status}}</td></tr>`; }});
+                p.top.forEach(t => {{ html += `<tr><td style="color:#b48ead;">${{t.title}}</td><td style="color:#e4e4e7; font-size:11px;">${{t.genres}}</td><td style="font-weight:bold;">${{t.hours}}</td></tr>`; }});
+                
+                html += `</table><br><h3 style="color:#d8b4e2; margin-top:30px;">📜 История статусов:</h3>
+                <table><tr><th>#</th><th>Дата<br>(Алматы)</th><th>Статус</th></tr>`;
+                
+                p.history.forEach(h => {{ html += `<tr><td class="col-id">${{h.num}}</td><td class="col-time">${{h.time}}</td><td style="color:#e4e4e7;">${{h.status}}</td></tr>`; }});
                 html += `</table></div></div>`;
                 area.innerHTML += html;
             }});
@@ -479,22 +542,44 @@ class Monitor:
             tabs.appendChild(a_btn);
             
             let a_html = `<div id="anime-tab" class="tab-content">`;
+            if (data.anime.length === 0) a_html += `<div style="text-align:center; padding:20px;">Тайтлов нет. Добавьте через бота.</div>`;
             data.anime.forEach(a => {{
-                a_html += `<div class="anime-card"><b>${{a.title}}</b><br>Серия: ${{a.ep}} (<i>${{a.voice}}</i>)</div>`;
+                a_html += `<div class="anime-card"><b>${{a.title}}</b><br>Серия: <b>${{a.ep}}</b> (Озвучка: <i>${{a.voice}}</i>)</div>`;
             }});
             a_html += `</div>`;
             area.innerHTML += a_html;
 
-            // Рисуем графики
+            // Рендер Графиков
             data.profiles.forEach((p, i) => {{
-                new Chart(document.getElementById('chart-'+i), {{
+                // Doughnut (Круговая)
+                new Chart(document.getElementById('chart-doughnut-'+i), {{
                     type: 'doughnut',
                     data: {{
                         labels: ['Смотрит', 'Онлайн', 'Оффлайн'],
-                        datasets: [{{ data: p.stats, backgroundColor: ['#c084fc', '#2dd4bf', '#fb7185'], borderWidth: 0 }}]
+                        datasets: [{{ data: p.stats, backgroundColor: ['#b48ead', '#2dd4bf', '#fb7185'], borderWidth: 2, borderColor: '#18181b' }}]
                     }},
-                    options: {{ responsive: true, maintainAspectRatio: false, plugins: {{ legend: {{ position: 'bottom', labels: {{color: '#fff'}} }} }} }}
+                    options: {{ 
+                        responsive: true, maintainAspectRatio: false, 
+                        plugins: {{ legend: {{ position: 'bottom', labels: {{color: '#a1a1aa', font: {{size: 14}} }} }} }},
+                        cutout: '55%'
+                    }}
                 }});
+                
+                // Polar Area (Жанры)
+                if (p.genres.length > 0) {{
+                    new Chart(document.getElementById('chart-polar-'+i), {{
+                        type: 'polarArea',
+                        data: {{
+                            labels: p.genres.map(g => g.genre),
+                            datasets: [{{ data: p.genres.map(g => g.hours), backgroundColor: '#7e57c2', borderWidth: 2, borderColor: '#18181b' }}]
+                        }},
+                        options: {{ 
+                            responsive: true, maintainAspectRatio: false,
+                            scales: {{ r: {{ ticks: {{display: false}}, grid: {{color: '#3f3f46'}} }} }},
+                            plugins: {{ legend: {{ position: 'bottom', labels: {{color: '#a1a1aa'}} }} }}
+                        }}
+                    }});
+                }}
             }});
         }}
         
@@ -524,8 +609,9 @@ class Monitor:
             
             self.store.anime_subs[f"{a_id}_{voice}"] = {"title": title, "voice": voice, "last_ep": last_ep, "users": [uid]}
             self.store.save()
-            self.telegram.answer_callback(cb.get("id"), "Подписка оформлена!")
+            self.telegram.answer_callback(cb.get("id"), f"Подписка на {voice} оформлена!")
             self.telegram.edit_message_text(chat_id, msg_id, f"✅ Подписка оформлена!\n🎬 <b>{title}</b>\n🎙 Озвучка: <b>{voice}</b>")
+            self.generate_html_report()
 
     def handle_message(self, msg: dict):
         user = msg.get("from", {})
@@ -534,9 +620,10 @@ class Monitor:
         text = compact(msg.get("text", ""))
 
         if not text: return
+        
         if text.lower() in ["/cancel", "отмена", "❌ отмена"]:
             self.user_states.pop(uid, None)
-            self.telegram.send_message(chat_id, "❌ Отменено.", reply_markup=TELEGRAM_KEYBOARD)
+            self.telegram.send_message(chat_id, "❌ Действие отменено.", reply_markup=TELEGRAM_KEYBOARD)
             return
 
         if not self.store.chat_id:
@@ -545,8 +632,7 @@ class Monitor:
             self.store.save()
 
         if uid not in self.store.allowed_users:
-            self.telegram.send_message(chat_id, "⛔ Нет доступа.")
-            return
+            return self.telegram.send_message(chat_id, "⛔ У вас нет доступа к боту.")
 
         self.notify_spy(user, text)
         state = self.user_states.get(uid)
@@ -558,25 +644,35 @@ class Monitor:
                 self.store.save()
                 self.user_states.pop(uid, None)
                 self.telegram.send_message(chat_id, f"✅ Профиль {p_id} добавлен!", reply_markup=TELEGRAM_KEYBOARD)
-            except Exception as e: self.telegram.send_message(chat_id, f"❌ Ошибка: {e}")
+            except Exception as e: self.telegram.send_message(chat_id, f"❌ Ошибка: отправьте ссылку или '❌ Отмена'.")
+            return
+            
+        if state == "await_profile_del":
+            if text in self.store.profiles:
+                del self.store.profiles[text]
+                self.store.save()
+                self.user_states.pop(uid, None)
+                self.telegram.send_message(chat_id, f"🗑 Профиль {text} удален.", reply_markup=TELEGRAM_KEYBOARD)
+            else:
+                self.telegram.send_message(chat_id, "❌ ID не найден. Отправьте ID или '❌ Отмена'.")
             return
             
         if state == "await_anime":
             match = re.search(r'(\d+)', text)
-            if not match: return self.telegram.send_message(chat_id, "❌ Не найден ID.")
+            if not match: return self.telegram.send_message(chat_id, "❌ Не найден ID. Отправьте ссылку на Anivox.")
             a_id = match.group(1)
             
-            self.telegram.send_message(chat_id, "⏳ Ищу доступные озвучки на Kodik и Anivox...")
+            self.telegram.send_message(chat_id, "⏳ Ищу доступные озвучки на Anivox...")
             title, voices = find_anime_voices(a_id)
             self.user_states.pop(uid, None)
 
-            if not voices: return self.telegram.send_message(chat_id, "😔 Озвучки не найдены.", reply_markup=TELEGRAM_KEYBOARD)
+            if not voices: return self.telegram.send_message(chat_id, "😔 Озвучки не найдены. Вероятно аниме еще не вышло.", reply_markup=TELEGRAM_KEYBOARD)
 
             self.store.anime_cache[a_id] = {"title": title, "voices": voices}
             kb = []
             v_list = list(voices.keys())[:14]
             for i in range(0, len(v_list), 2):
-                kb.append([{"text": v, "callback_data": f"sub|{a_id}|{v[:25]}"} for v in v_list[i:i+2]])
+                kb.append([{"text": v, "callback_data": f"sub|{a_id}|{v[:20]}"} for v in v_list[i:i+2]])
 
             self.telegram.send_message(chat_id, f"🎬 <b>{title}</b>\nВыберите озвучку:", reply_markup={"inline_keyboard": kb})
             return
@@ -587,28 +683,40 @@ class Monitor:
                 return self.telegram.send_message(chat_id, "🚪 Вы вышли из чата.", reply_markup=TELEGRAM_KEYBOARD)
             for f_id in self.store.allowed_users:
                 if f_id != uid:
-                    try: self.telegram.send_message(f_id, f"💬 <b>{user.get('first_name')}:</b>\n{text}")
+                    try: self.telegram.send_message(f_id, f"💬 <b>{user.get('first_name', 'Друг')}:</b>\n{text}")
                     except: pass
             return
 
         # ОСНОВНОЕ МЕНЮ
         if text in ["/start", "меню"]: self.telegram.send_message(chat_id, "👋 Привет!", reply_markup=TELEGRAM_KEYBOARD)
-        elif text == "📊 Проверить всех": threading.Thread(target=self.check_all, daemon=True).start()
+        elif text == "📊 Проверить всех": 
+            self.telegram.send_message(chat_id, "⏳ Проверяю...")
+            threading.Thread(target=self.check_all, daemon=True).start()
         elif text == "🌐 Открыть сайт-отчет":
             self.generate_html_report()
             url = os.getenv("RENDER_EXTERNAL_URL", f"http://0.0.0.0:{os.getenv('PORT', '15887')}")
-            self.telegram.send_message(chat_id, f"🌐 Ваш отчет (Графики): {url}/anivox_report.html")
+            self.telegram.send_message(chat_id, f"🌐 Ваш отчет с графиками:\n{url}/anivox_report.html")
         elif text == "➕ Добавить профиль":
             self.user_states[uid] = "await_profile"
-            self.telegram.send_message(chat_id, "Отправьте ссылку на профиль Anivox:", reply_markup=CANCEL_KEYBOARD)
+            self.telegram.send_message(chat_id, "Отправьте <b>ссылку на профиль Anivox</b>:", reply_markup=CANCEL_KEYBOARD)
+        elif text == "🗑 Удалить профиль":
+            self.user_states[uid] = "await_profile_del"
+            msg = "Отправьте <b>ID профиля</b> для удаления.\nВаши профили:\n" + "\n".join([f"• <code>{k}</code>" for k in self.store.profiles.keys()])
+            self.telegram.send_message(chat_id, msg, reply_markup=CANCEL_KEYBOARD)
+        elif text == "👥 Мои профили":
+            msg = "👥 <b>Отслеживаемые профили:</b>\n"
+            for p in self.store.profiles.values(): msg += f"• <b>{p.label or p.profile_id}</b> — {p.last_status or 'не проверялся'}\n"
+            self.telegram.send_message(chat_id, msg or "Список пуст.")
         elif text == "🎬 Аниме трекер":
             self.user_states[uid] = "await_anime"
             self.telegram.send_message(chat_id, "Отправьте ссылку на аниме (anivox.fun/anime/ID):", reply_markup=CANCEL_KEYBOARD)
         elif text == "💬 Чат друзей":
             self.user_states[uid] = "chat"
             self.telegram.send_message(chat_id, "Вы вошли в чат.", reply_markup=CHAT_KEYBOARD)
-        elif text == "🗑 Удалить профиль":
-            self.telegram.send_message(chat_id, "Для удаления напишите ID (скоро добавим кнопки)")
+        elif text == "🎭 Друзья":
+            msg = "🎭 <b>Ваши друзья:</b>\n" + "\n".join([f"• <code>{f}</code>" for f in self.store.allowed_users])
+            msg += "\n\n(Управление временно работает только через конфиг файл)"
+            self.telegram.send_message(chat_id, msg)
 
     def run(self):
         last_check, last_anime = 0.0, 0.0
