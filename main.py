@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""AniVox Monitor v6.0.0 (Original Polar Chart Dashboard + Smart Voice Search & Spy)."""
+"""
+AniVox Monitor v7.0.0 (Ultimate Edition)
+- WebSocket connection for profiles
+- Original Advanced HTML Dashboard (Doughnut & Polar Charts)
+- Smart Anime Voice Search (Kodik + Anivox) with error reasons
+- Owner Spy Mode & Friend Management UI
+- 24/7 Render WebServer Support
+"""
 
 from __future__ import annotations
 
@@ -24,10 +31,13 @@ import urllib.request
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Tuple, Dict, List
 
+# ==========================================
+# КОНФИГУРАЦИЯ И КОНСТАНТЫ
+# ==========================================
 APP_NAME = "AniVox Monitor"
-VERSION = "6.0.0"
+VERSION = "7.0.0"
 CONFIG_PATH = Path(__file__).with_name("anivox_monitor.json")
 LOG_PATH = Path(__file__).with_name("anivox_monitor.log")
 REPORT_PATH = Path(__file__).with_name("anivox_report.html")
@@ -38,7 +48,11 @@ ANIME_RE = re.compile(r"^https?://(?:www\.)?anivox\.fun/anime/([0-9]+)(?:[/?#].*
 DEFAULT_INTERVAL = 10
 DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", handlers=[logging.StreamHandler(sys.stdout)])
+logging.basicConfig(
+    level=logging.INFO, 
+    format="%(asctime)s [%(levelname)s] %(message)s", 
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
 logger = logging.getLogger(APP_NAME)
 
 TELEGRAM_KEYBOARD = {
@@ -80,9 +94,12 @@ def normalize_profile_url(value: str) -> tuple[str, str]:
     normalized = urllib.parse.urlunparse(("https", parsed.netloc.lower(), parsed.path.rstrip("/"), "", "", ""))
     match = PROFILE_RE.match(normalized)
     if not match:
-        raise ValueError("Нужна ссылка вида https://anivox.fun/profile/27788")
+        raise ValueError("Ссылка должна быть формата https://anivox.fun/profile/12345")
     return normalized, match.group(1)
 
+# ==========================================
+# СТРУКТУРЫ ДАННЫХ
+# ==========================================
 @dataclass
 class Profile:
     url: str
@@ -93,6 +110,23 @@ class Profile:
     last_ok: bool = False
     last_error: str = ""
     last_status: str = ""
+
+class FetchResult:
+    def __init__(self, ok: bool, profile_id: str, url: str, nickname="неизвестно", level="неизвестно", presence="неизвестно", title="", error=""):
+        self.ok = ok
+        self.profile_id = profile_id
+        self.url = url
+        self.nickname = nickname
+        self.level = level
+        self.presence = presence
+        self.title = title
+        self.error = error
+        self.checked_at = datetime.now(almaty_tz()).isoformat(timespec="seconds")
+    
+    @property
+    def signature(self) -> str:
+        state = f"watching:{self.title.lower()}" if self.presence.startswith("Смотрит:") else ("online" if "Онлайн" in self.presence else "offline")
+        return f"{self.nickname.lower()}|{self.level}|{state}|{self.title.lower()}"
 
 class Store:
     def __init__(self, path: Path) -> None:
@@ -130,7 +164,7 @@ class Store:
             "history": self.history,
         })
 
-    def add_history(self, profile_id: str, result: "FetchResult", changes: list[str]) -> None:
+    def add_history(self, profile_id: str, result: FetchResult, changes: list[str]) -> None:
         if not result.ok or not changes: return
         entries = self.history.setdefault(profile_id, [])
         entries.append({
@@ -141,6 +175,9 @@ class Store:
         })
         self.history[profile_id] = entries[-500:]
 
+# ==========================================
+# КЛИЕНТ TELEGRAM
+# ==========================================
 class TelegramClient:
     def __init__(self, token: str) -> None:
         self.token = token.strip()
@@ -153,7 +190,9 @@ class TelegramClient:
         try:
             with urllib.request.urlopen(req, timeout=15) as resp:
                 return json.loads(resp.read().decode("utf-8")).get("result")
-        except Exception: return None
+        except Exception as e:
+            logger.error(f"Telegram API Error ({method}): {e}")
+            return None
 
     def send_message(self, chat_id: str, text: str, reply_markup: dict = None) -> None:
         self.request("sendMessage", {
@@ -167,7 +206,7 @@ class TelegramClient:
         self.request("editMessageText", req_data)
 
     def answer_callback(self, cb_id: str, text: str) -> None:
-        self.request("answerCallbackQuery", {"callback_query_id": cb_id, "text": text})
+        self.request("answerCallbackQuery", {"callback_query_id": cb_id, "text": text, "show_alert": "false"})
 
     def get_updates(self) -> list:
         res = self.request("getUpdates", {"offset": self.offset, "timeout": 2})
@@ -175,24 +214,21 @@ class TelegramClient:
         if updates: self.offset = updates[-1]["update_id"] + 1
         return updates
 
-class FetchResult:
-    def __init__(self, ok: bool, profile_id: str, url: str, nickname="неизвестно", level="неизвестно", presence="неизвестно", title="", error=""):
-        self.ok = ok
-        self.profile_id = profile_id
-        self.url = url
-        self.nickname = nickname
-        self.level = level
-        self.presence = presence
-        self.title = title
-        self.error = error
-        self.checked_at = datetime.now(almaty_tz()).isoformat(timespec="seconds")
-    
-    @property
-    def signature(self) -> str:
-        state = f"watching:{self.title.lower()}" if self.presence.startswith("Смотрит:") else ("online" if "Онлайн" in self.presence else "offline")
-        return f"{self.nickname.lower()}|{self.level}|{state}|{self.title.lower()}"
+# ==========================================
+# СЕТЕВЫЕ ЗАПРОСЫ: WEBSOCKET & ANIME
+# ==========================================
+def recv_exact(sock: socket.socket, length: int) -> bytes:
+    chunks = []
+    remaining = length
+    while remaining > 0:
+        chunk = sock.recv(remaining)
+        if not chunk: raise ConnectionError("WebSocket соединение разорвано сервером")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
 
 def anivox_websocket_profile(profile_id: str, timeout: int = 15) -> dict:
+    """Подключается к Anivox по WebSocket для получения статуса без задержек."""
     host = "anivox.fun"
     raw_socket = socket.create_connection((host, 443), timeout=timeout)
     context = ssl.create_default_context()
@@ -205,8 +241,10 @@ def anivox_websocket_profile(profile_id: str, timeout: int = 15) -> dict:
     try:
         sock.sendall(handshake)
         resp = b""
-        while b"\r\n\r\n" not in resp: resp += sock.recv(4096)
-        
+        while b"\r\n\r\n" not in resp: 
+            resp += sock.recv(4096)
+            if len(resp) > 65536: raise ConnectionError("Слишком длинный ответ сервера")
+            
         data = json.dumps({"type": "get_profile", "id": int(profile_id)}).encode()
         mask = os.urandom(4)
         masked = bytes(b ^ mask[i % 4] for i, b in enumerate(data))
@@ -219,18 +257,24 @@ def anivox_websocket_profile(profile_id: str, timeout: int = 15) -> dict:
             h = sock.recv(2)
             if not h: break
             length = h[1] & 0x7F
-            if length == 126: length = struct.unpack("!H", sock.recv(2))[0]
-            elif length == 127: length = struct.unpack("!Q", sock.recv(8))[0]
-            mask = sock.recv(4) if (h[1] & 0x80) else b""
-            payload = sock.recv(length)
-            if mask: payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
-            if (h[0] & 0x0F) in (1, 0):
+            if length == 126: length = struct.unpack("!H", recv_exact(sock, 2))[0]
+            elif length == 127: length = struct.unpack("!Q", recv_exact(sock, 8))[0]
+            
+            mask_bytes = recv_exact(sock, 4) if (h[1] & 0x80) else b""
+            payload = recv_exact(sock, length)
+            
+            if mask_bytes: payload = bytes(b ^ mask_bytes[i % 4] for i, b in enumerate(payload))
+            
+            opcode = h[0] & 0x0F
+            if opcode == 9: # Ping
+                sock.sendall(bytes((0x8A, length)) + payload)
+            elif opcode in (1, 0): # Text frame
                 msg = payload.decode(errors="replace")
                 try:
                     js = json.loads(msg)
                     if js.get("type") == "get_profile": return js
                 except: pass
-        raise TimeoutError("Таймаут WS")
+        raise TimeoutError("Сервер Anivox не прислал данные профиля в отведенное время")
     finally:
         try: sock.close()
         except: pass
@@ -239,7 +283,7 @@ def fetch_profile(profile: Profile) -> FetchResult:
     try:
         data = anivox_websocket_profile(profile.profile_id)
         user = data.get("data", {}).get("user", {})
-        if not user: return FetchResult(False, profile.profile_id, profile.url, error="Нет данных")
+        if not user: return FetchResult(False, profile.profile_id, profile.url, error="Пользователь скрыт или не существует")
         
         online = user.get("online", 0)
         st_text = data.get("data", {}).get("online_status", "")
@@ -265,44 +309,52 @@ def changed_fields(old: str, result: FetchResult) -> list[str]:
     if prev[2].startswith("watching:") and curr[2].startswith("watching:") and prev[3] != curr[3]: ch.append("тайтл")
     return ch
 
-# --- УМНЫЙ ПОИСК ОЗВУЧЕК (ANIVOX + SHIKIMORI/KODIK) ---
-def find_anime_voices(anime_id: str) -> tuple[str, dict]:
+def find_anime_voices(anime_id: str) -> tuple[str, dict, str]:
+    """Ищет озвучки. Возвращает (Название, Озвучки, Ошибка/Причина)."""
     title = f"Аниме ID {anime_id}"
     voices = {}
+    error_reason = ""
     
-    # 1. Запрос на Shikimori для жанров и русского названия
+    # 1. Поиск названия на Shikimori
     try:
-        req_title = urllib.request.Request(f"https://shikimori.one/api/animes/{anime_id}")
-        with urllib.request.urlopen(req_title, timeout=5) as r:
-            s_data = json.loads(r.read().decode())
-            title = s_data.get("russian", title)
-    except: pass
+        req_title = urllib.request.Request(f"https://shikimori.one/api/animes/{anime_id}", headers={"User-Agent": DEFAULT_USER_AGENT})
+        with urllib.request.urlopen(req_title, timeout=5) as r: 
+            title = json.loads(r.read().decode()).get("russian", title)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return title, voices, f"Аниме с ID {anime_id} не существует (Ошибка 404 на Shikimori)."
+    except Exception as e:
+        error_reason += f"(Shikimori недоступен: {e}) "
 
-    # 2. Основной запрос на Anivox
+    # 2. Поиск озвучек на Anivox
     try:
         req = urllib.request.Request(f"https://anivox.fun/api/anime/{anime_id}", headers={"User-Agent": DEFAULT_USER_AGENT})
         with urllib.request.urlopen(req, timeout=5) as r:
             data = json.loads(r.read().decode())
-            translations = data.get("data", {}).get("translations", [])
-            for t in translations:
-                v_name = t.get("name")
-                if v_name: voices[v_name] = max(voices.get(v_name, 0), int(t.get("episodes_count", 0)))
-    except: pass
+            for t in data.get("data", {}).get("translations", []):
+                if v_name := t.get("name"): 
+                    voices[v_name] = max(voices.get(v_name, 0), int(t.get("episodes_count", 0)))
+    except Exception as e:
+        error_reason += f"(Anivox API недоступен) "
 
-    # 3. Доп. запрос на Kodik
-    if not voices:
-        try:
-            req_v = urllib.request.Request(f"https://kodikapi.com/search?token=41f4f585f39e31d4e0e4b85d3a5ca78d&shikimori_id={anime_id}&with_episodes=true")
-            with urllib.request.urlopen(req_v, timeout=5) as r:
-                for item in json.loads(r.read().decode()).get("results", []):
-                    v_name = item.get("translation", {}).get("title")
-                    if v_name: voices[v_name] = max(voices.get(v_name, 0), int(item.get("last_episode") or item.get("episodes_count") or 1))
-        except: pass
+    # 3. Поиск озвучек на Kodik
+    try:
+        req_v = urllib.request.Request(f"https://kodikapi.com/search?token=41f4f585f39e31d4e0e4b85d3a5ca78d&shikimori_id={anime_id}&with_episodes=true")
+        with urllib.request.urlopen(req_v, timeout=5) as r:
+            for item in json.loads(r.read().decode()).get("results", []):
+                v_name = item.get("translation", {}).get("title")
+                if v_name: 
+                    voices[v_name] = max(voices.get(v_name, 0), int(item.get("last_episode") or item.get("episodes_count") or 1))
+    except Exception as e:
+        error_reason += f"(Kodik API недоступен) "
 
-    return title, voices
+    if not voices and not error_reason:
+        error_reason = "Базы данных пусты. Скорее всего, аниме еще не вышло (онгоинг) или для него нет перевода."
 
-# --- ПОИСК ЖАНРОВ АНИМЕ ЧЕРЕЗ SHIKIMORI ---
+    return title, voices, error_reason
+
 def fetch_genres(title: str, cache: dict) -> list[str]:
+    """Фоновый поиск жанров для полярной диаграммы."""
     if title in cache and "genres" in cache[title]: return cache[title]["genres"]
     genres = []
     try:
@@ -312,17 +364,14 @@ def fetch_genres(title: str, cache: dict) -> list[str]:
             s_data = json.loads(r.read().decode())
             if s_data:
                 a_id = s_data[0]["id"]
-                det_url = f"https://shikimori.one/api/animes/{a_id}"
-                req2 = urllib.request.Request(det_url, headers={"User-Agent": DEFAULT_USER_AGENT})
+                req2 = urllib.request.Request(f"https://shikimori.one/api/animes/{a_id}", headers={"User-Agent": DEFAULT_USER_AGENT})
                 with urllib.request.urlopen(req2, timeout=5) as r2:
-                    det = json.loads(r2.read().decode())
-                    genres = [g.get("russian") or g.get("name") for g in det.get("genres", [])]
+                    genres = [g.get("russian") or g.get("name") for g in json.loads(r2.read().decode()).get("genres", [])]
     except: pass
     if title not in cache: cache[title] = {}
     cache[title]["genres"] = genres
     return genres
 
-# --- РАСЧЕТ СТАТИСТИКИ (ДЛЯ ОРИГИНАЛЬНЫХ ДИАГРАММ) ---
 def calc_stats(entries: list, cache: dict) -> tuple[float, float, float, dict, dict]:
     w_time, on_time, off_time = 0.0, 0.0, 0.0
     titles = {}
@@ -352,7 +401,9 @@ def calc_stats(entries: list, cache: dict) -> tuple[float, float, float, dict, d
             
     return round(w_time, 1), round(on_time, 1), round(off_time, 1), titles, genres_time
 
-# --- ВЕБ-СЕРВЕР ---
+# ==========================================
+# ВЕБ-СЕРВЕР RENDER
+# ==========================================
 class QuietHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
         if self.path in ("/", "/index.html"): self.path = "/anivox_report.html"
@@ -365,9 +416,14 @@ def run_web_server():
     try:
         socketserver.TCPServer.allow_reuse_address = True
         with socketserver.TCPServer(("0.0.0.0", port), QuietHTTPRequestHandler) as httpd:
+            logger.info(f"Сайт запущен на порту {port}")
             httpd.serve_forever()
-    except: pass
+    except Exception as e: 
+        logger.error(f"Ошибка веб-сервера: {e}")
 
+# ==========================================
+# ОСНОВНОЙ КЛАСС МОНИТОРА
+# ==========================================
 class Monitor:
     def __init__(self, store: Store, telegram: TelegramClient):
         self.store = store
@@ -378,10 +434,14 @@ class Monitor:
         self.user_states = {}
 
     def notify_spy(self, user: dict, action: str):
+        """ШПИОН: Уведомляет владельца о действиях других юзеров."""
         if not self.store.chat_id: return
         uid = str(user.get("id", ""))
-        if uid == str(self.store.chat_id): return
-        msg = f"👁 <b>Шпион:</b> {html.escape(user.get('first_name', ''))} (<code>{uid}</code>) -> {html.escape(action)}"
+        if uid == str(self.store.chat_id): return # Не уведомлять о самом себе
+        
+        first_name = user.get("first_name", "Неизвестный")
+        username = f"(@{user.get('username')})" if user.get('username') else ""
+        msg = f"👁 <b>[Шпион] Действие пользователя:</b>\n👤 {html.escape(first_name)} {username}\n🆔 <code>{uid}</code>\n⚡ {html.escape(action)}"
         try: self.telegram.send_message(self.store.chat_id, msg)
         except: pass
 
@@ -406,7 +466,7 @@ class Monitor:
         updated = False
         a_ids = set([k.split('_')[0] for k in self.store.anime_subs.keys()])
         for a_id in a_ids:
-            _, voices = find_anime_voices(a_id)
+            _, voices, _ = find_anime_voices(a_id)
             for sub_key, data in list(self.store.anime_subs.items()):
                 if sub_key.startswith(f"{a_id}_"):
                     t_voice, last_ep = data.get("voice", ""), int(data.get("last_ep", 0))
@@ -415,12 +475,12 @@ class Monitor:
                         data["last_ep"] = curr_ep
                         updated = True
                         for uid in data.get("users", self.store.allowed_users):
-                            self.telegram.send_message(uid, f"🎉 <b>Новая серия!</b>\n🎬 <b>{data['title']}</b>\n🎞 Серия: <b>{curr_ep}</b>\n🎙 Озвучка: <i>{t_voice}</i>")
+                            self.telegram.send_message(uid, f"🎉 <b>Вышла новая серия!</b>\n🎬 <b>{data['title']}</b>\n🎞 Серия: <b>{curr_ep}</b>\n🎙 Озвучка: <i>{t_voice}</i>")
         if updated:
             self.store.save()
             self.generate_html_report()
 
-    # --- ВОССТАНОВЛЕННЫЙ ОРИГИНАЛЬНЫЙ САЙТ С КРУГОВЫМ И ПОЛЯРНЫМ ГРАФИКАМИ ---
+    # --- ГЕНЕРАЦИЯ ОРИГИНАЛЬНОГО САЙТА ---
     def generate_html_report(self):
         now = datetime.now(almaty_tz()).strftime("%d.%m %H:%M")
         js_data = {"profiles": [], "anime": []}
@@ -430,7 +490,7 @@ class Monitor:
             w_time, on_time, off_time, titles, genres = calc_stats(entries, self.store.anime_cache)
             
             top_titles = []
-            for k, v in sorted(titles.items(), key=lambda x: x[1], reverse=True)[:15]:
+            for k, v in sorted(titles.items(), key=lambda x: x[1], reverse=True)[:10]:
                 g_str = ", ".join(self.store.anime_cache.get(k, {}).get("genres", [])) or "-"
                 top_titles.append({"title": k, "genres": g_str, "hours": round(v, 1)})
                 
@@ -467,7 +527,7 @@ class Monitor:
         .tab-content {{ display: none; }}
         .tab-content.active {{ display: block; }}
         
-        .prof-container {{ background: #27272a; border-radius: 12px; padding: 15px; margin-bottom: 20px; }}
+        .prof-container {{ background: #27272a; border-radius: 12px; padding: 15px; margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }}
         .prof-header {{ display: flex; align-items: center; gap: 10px; font-size: 18px; font-weight: bold; margin-bottom: 15px; }}
         
         .stats-grid {{ display: grid; grid-template-columns: 1fr; gap: 10px; text-align: center; margin-bottom: 20px; }}
@@ -571,7 +631,7 @@ class Monitor:
                         type: 'polarArea',
                         data: {{
                             labels: p.genres.map(g => g.genre),
-                            datasets: [{{ data: p.genres.map(g => g.hours), backgroundColor: '#7e57c2', borderWidth: 2, borderColor: '#18181b' }}]
+                            datasets: [{{ data: p.genres.map(g => g.hours), backgroundColor: ['#7e57c2', '#ab47bc', '#5c6bc0', '#26a69a', '#ec407a', '#ffa726'], borderWidth: 1, borderColor: '#18181b' }}]
                         }},
                         options: {{ 
                             responsive: true, maintainAspectRatio: false,
@@ -621,30 +681,36 @@ class Monitor:
 
         if not text: return
         
-        if text.lower() in ["/cancel", "отмена", "❌ отмена"]:
+        # 1. ОТМЕНА ВСЕХ ДЕЙСТВИЙ (ПЕРЕХВАТЧИК ЗАВИСАНИЙ)
+        if text.lower() in ["/cancel", "отмена", "отменить", "❌ отмена"]:
             self.user_states.pop(uid, None)
-            self.telegram.send_message(chat_id, "❌ Действие отменено.", reply_markup=TELEGRAM_KEYBOARD)
+            self.telegram.send_message(chat_id, "❌ Действие отменено. Вы вернулись в главное меню.", reply_markup=TELEGRAM_KEYBOARD)
             return
 
+        # 2. ПРОВЕРКА ДОСТУПА И НАЗНАЧЕНИЕ ВЛАДЕЛЬЦА
         if not self.store.chat_id:
             self.store.chat_id = uid
             if uid not in self.store.allowed_users: self.store.allowed_users.append(uid)
             self.store.save()
+            self.telegram.send_message(chat_id, "👑 Вы назначены владельцем бота!")
 
         if uid not in self.store.allowed_users:
-            return self.telegram.send_message(chat_id, "⛔ У вас нет доступа к боту.")
+            self.notify_spy(user, f"Пытался получить доступ. Текст: {text}")
+            return self.telegram.send_message(chat_id, "⛔ У вас нет доступа к боту. Обратитесь к владельцу.")
 
-        self.notify_spy(user, text)
+        # Уведомляем владельца о действии пользователя (Шпион)
+        self.notify_spy(user, f"Отправил: {text}")
         state = self.user_states.get(uid)
 
+        # 3. ОБРАБОТКА ШАГОВ (ВВОД ДАННЫХ)
         if state == "await_profile":
             try:
                 url, p_id = normalize_profile_url(text)
                 self.store.profiles[p_id] = Profile(url=url, profile_id=p_id, label=p_id)
                 self.store.save()
                 self.user_states.pop(uid, None)
-                self.telegram.send_message(chat_id, f"✅ Профиль {p_id} добавлен!", reply_markup=TELEGRAM_KEYBOARD)
-            except Exception as e: self.telegram.send_message(chat_id, f"❌ Ошибка: отправьте ссылку или '❌ Отмена'.")
+                self.telegram.send_message(chat_id, f"✅ Профиль {p_id} успешно добавлен!", reply_markup=TELEGRAM_KEYBOARD)
+            except Exception as e: self.telegram.send_message(chat_id, f"❌ Ошибка: {e}. Отправьте правильную ссылку или нажмите '❌ Отмена'.")
             return
             
         if state == "await_profile_del":
@@ -654,19 +720,41 @@ class Monitor:
                 self.user_states.pop(uid, None)
                 self.telegram.send_message(chat_id, f"🗑 Профиль {text} удален.", reply_markup=TELEGRAM_KEYBOARD)
             else:
-                self.telegram.send_message(chat_id, "❌ ID не найден. Отправьте ID или '❌ Отмена'.")
+                self.telegram.send_message(chat_id, "❌ ID не найден. Нажмите '❌ Отмена' или отправьте правильный ID.")
             return
-            
+
+        if state == "await_friend_add":
+            if text.isdigit() and text not in self.store.allowed_users:
+                self.store.allowed_users.append(text)
+                self.store.save()
+                self.user_states.pop(uid, None)
+                self.telegram.send_message(chat_id, f"✅ Друг с ID {text} добавлен!", reply_markup=TELEGRAM_KEYBOARD)
+            else:
+                self.telegram.send_message(chat_id, "❌ Неверный ID или друг уже есть. Нажмите '❌ Отмена'.")
+            return
+
+        if state == "await_friend_del":
+            if text in self.store.allowed_users and text != self.store.chat_id:
+                self.store.allowed_users.remove(text)
+                self.store.save()
+                self.user_states.pop(uid, None)
+                self.telegram.send_message(chat_id, f"🗑 Друг {text} удален.", reply_markup=TELEGRAM_KEYBOARD)
+            else:
+                self.telegram.send_message(chat_id, "❌ Ошибка. Нельзя удалить владельца или ID не найден. Нажмите '❌ Отмена'.")
+            return
+
         if state == "await_anime":
             match = re.search(r'(\d+)', text)
-            if not match: return self.telegram.send_message(chat_id, "❌ Не найден ID. Отправьте ссылку на Anivox.")
+            if not match: return self.telegram.send_message(chat_id, "❌ Не найден ID в ссылке. Нажмите '❌ Отмена'.")
             a_id = match.group(1)
             
-            self.telegram.send_message(chat_id, "⏳ Ищу доступные озвучки на Anivox...")
-            title, voices = find_anime_voices(a_id)
+            self.telegram.send_message(chat_id, "⏳ Выполняю поиск доступных озвучек по базам (Anivox & Kodik)...")
+            title, voices, err_reason = find_anime_voices(a_id)
             self.user_states.pop(uid, None)
 
-            if not voices: return self.telegram.send_message(chat_id, "😔 Озвучки не найдены. Вероятно аниме еще не вышло.", reply_markup=TELEGRAM_KEYBOARD)
+            if not voices: 
+                err_msg = f"😔 <b>Озвучки не найдены.</b>\nПричина: {err_reason}"
+                return self.telegram.send_message(chat_id, err_msg, reply_markup=TELEGRAM_KEYBOARD)
 
             self.store.anime_cache[a_id] = {"title": title, "voices": voices}
             kb = []
@@ -674,23 +762,23 @@ class Monitor:
             for i in range(0, len(v_list), 2):
                 kb.append([{"text": v, "callback_data": f"sub|{a_id}|{v[:20]}"} for v in v_list[i:i+2]])
 
-            self.telegram.send_message(chat_id, f"🎬 <b>{title}</b>\nВыберите озвучку:", reply_markup={"inline_keyboard": kb})
+            self.telegram.send_message(chat_id, f"🎬 <b>{title}</b>\nНайдено озвучек: {len(voices)}.\nВыберите озвучку для подписки:", reply_markup={"inline_keyboard": kb})
             return
 
         if state == "chat":
             if text == "🚪 Выйти из чата":
                 self.user_states.pop(uid, None)
-                return self.telegram.send_message(chat_id, "🚪 Вы вышли из чата.", reply_markup=TELEGRAM_KEYBOARD)
+                return self.telegram.send_message(chat_id, "🚪 Вы покинули чат.", reply_markup=TELEGRAM_KEYBOARD)
             for f_id in self.store.allowed_users:
                 if f_id != uid:
                     try: self.telegram.send_message(f_id, f"💬 <b>{user.get('first_name', 'Друг')}:</b>\n{text}")
                     except: pass
             return
 
-        # ОСНОВНОЕ МЕНЮ
-        if text in ["/start", "меню"]: self.telegram.send_message(chat_id, "👋 Привет!", reply_markup=TELEGRAM_KEYBOARD)
+        # 4. ОСНОВНОЕ МЕНЮ
+        if text in ["/start", "меню"]: self.telegram.send_message(chat_id, "👋 Привет! Выберите действие.", reply_markup=TELEGRAM_KEYBOARD)
         elif text == "📊 Проверить всех": 
-            self.telegram.send_message(chat_id, "⏳ Проверяю...")
+            self.telegram.send_message(chat_id, "⏳ Начинаю проверку...")
             threading.Thread(target=self.check_all, daemon=True).start()
         elif text == "🌐 Открыть сайт-отчет":
             self.generate_html_report()
@@ -709,24 +797,34 @@ class Monitor:
             self.telegram.send_message(chat_id, msg or "Список пуст.")
         elif text == "🎬 Аниме трекер":
             self.user_states[uid] = "await_anime"
-            self.telegram.send_message(chat_id, "Отправьте ссылку на аниме (anivox.fun/anime/ID):", reply_markup=CANCEL_KEYBOARD)
+            self.telegram.send_message(chat_id, "Отправьте ссылку на страницу аниме (anivox.fun/anime/ID) или просто его ID:", reply_markup=CANCEL_KEYBOARD)
         elif text == "💬 Чат друзей":
             self.user_states[uid] = "chat"
-            self.telegram.send_message(chat_id, "Вы вошли в чат.", reply_markup=CHAT_KEYBOARD)
+            self.telegram.send_message(chat_id, "Вы вошли в чат. Пишите сообщения, они будут отправлены друзьям.", reply_markup=CHAT_KEYBOARD)
         elif text == "🎭 Друзья":
-            msg = "🎭 <b>Ваши друзья:</b>\n" + "\n".join([f"• <code>{f}</code>" for f in self.store.allowed_users])
-            msg += "\n\n(Управление временно работает только через конфиг файл)"
+            msg = "🎭 <b>Управление доступом</b>\nВладелец: <code>" + str(self.store.chat_id) + "</code>\nДрузья:\n"
+            for f in self.store.allowed_users: 
+                if f != self.store.chat_id: msg += f"• <code>{f}</code>\n"
+            msg += "\nДля добавления напишите:\n<code>/add_friend ID_ДРУГА</code>\nДля удаления:\n<code>/del_friend ID_ДРУГА</code>"
             self.telegram.send_message(chat_id, msg)
+        elif text.startswith("/add_friend "):
+            self.user_states[uid] = "await_friend_add"
+            self.handle_message({"from": user, "chat": {"id": chat_id}, "text": text.split()[1]})
+        elif text.startswith("/del_friend "):
+            self.user_states[uid] = "await_friend_del"
+            self.handle_message({"from": user, "chat": {"id": chat_id}, "text": text.split()[1]})
 
     def run(self):
         last_check, last_anime = 0.0, 0.0
         self.generate_html_report()
+        logger.info("Бот успешно запущен и начал работу!")
+        
         while not self.stop_event.is_set():
             now = time.time()
             if not self.paused and (now - last_check >= self.store.interval_minutes * 60):
                 last_check = now
                 threading.Thread(target=self.check_all, daemon=True).start()
-            if now - last_anime >= 600:
+            if now - last_anime >= 600: # Раз в 10 минут проверяем озвучки
                 last_anime = now
                 threading.Thread(target=self.check_anime_updates, daemon=True).start()
 
@@ -739,9 +837,21 @@ class Monitor:
 
 def main():
     store = Store(CONFIG_PATH)
+    if not store.token:
+        logger.error("ОШИБКА: Токен Telegram-бота не установлен! Добавьте переменную окружения BOT_TOKEN.")
+        sys.exit(1)
+        
     telegram = TelegramClient(store.token)
     monitor = Monitor(store, telegram)
+    
     threading.Thread(target=run_web_server, daemon=True).start()
+    
+    def sig_handler(sig, frame):
+        monitor.stop()
+        sys.exit(0)
+    signal.signal(signal.SIGINT, sig_handler)
+    signal.signal(signal.SIGTERM, sig_handler)
+
     monitor.run()
 
 if __name__ == "__main__":
