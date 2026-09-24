@@ -753,22 +753,30 @@ def changed_fields(old: str, result: FetchResult) -> list[str]:
     return changes
 
 class QuietHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
-    """Скрывает назойливые логи локального сервера."""
+    """Скрывает назойливые логи локального сервера и перенаправляет на отчет."""
+    def do_GET(self):
+        # На Render при заходе по ссылке нужно сразу отдавать этот файл
+        if self.path in ("/", "/index.html"):
+            self.path = "/anivox_report.html"
+        return super().do_GET()
+
     def log_message(self, format, *args):
         pass
 
-def run_web_server(port: int = 15887):
-    """Запускает веб-сервер в директории со скриптом."""
+def run_web_server():
+    """Запускает веб-сервер для Render."""
+    # Render автоматически выдает порт, считываем его. Если портов нет — ставим 15887
+    port = int(os.getenv("PORT", 15887))
     work_dir = os.path.dirname(os.path.abspath(CONFIG_PATH))
     os.chdir(work_dir)
     try:
         socketserver.TCPServer.allow_reuse_address = True
-        with socketserver.TCPServer(("", port), QuietHTTPRequestHandler) as httpd:
-            logger.info(f"Web-сервер запущен: http://78.154.103.11:{port}/anivox_report.html")
+        # "0.0.0.0" означает, что сервер будет принимать трафик от Render, а не только локальный
+        with socketserver.TCPServer(("0.0.0.0", port), QuietHTTPRequestHandler) as httpd:
+            logger.info(f"Web-сервер успешно запущен на порту {port} (0.0.0.0)")
             httpd.serve_forever()
     except Exception as e:
         logger.error(f"Ошибка запуска Web-сервера: {e}")
-
 class Monitor:
     def __init__(self, store: Store, telegram: TelegramClient) -> None:
         self.store = store
