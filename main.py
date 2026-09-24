@@ -986,4 +986,630 @@ class Monitor:
         except TelegramError as exc:
             return f"Не удалось отправить экспорт: {exc}"
 
-    def gen
+    def generate_html_report(self, chat_id: Optional[str] = None) -> None:
+        path = CONFIG_PATH.with_name("anivox_report.html")
+        html_doc = [
+            "<!DOCTYPE html><html lang='ru'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>",
+            "<meta http-equiv='refresh' content='30'>",
+            "<title>AniVox Dashboard</title><script src='https://cdn.jsdelivr.net/npm/chart.js'></script>",
+            "<style>",
+            ":root { --bg: #f4f6f9; --card: #ffffff; --text: #333; --border: #e0e0e0; --primary: #007bff; --hover: #f1f1f1; --accent: #e3f2fd; }",
+            "@media (prefers-color-scheme: dark) { :root { --bg: #121212; --card: #1e1e1e; --text: #e0e0e0; --border: #333; --primary: #bb86fc; --hover: #2c2c2c; --accent: #2c2c2c; } }",
+            "body{font-family:'Segoe UI',sans-serif; background:var(--bg); color:var(--text); margin:0; padding:20px; transition: 0.3s;}",
+            "h2{text-align:center; font-size:26px;}",
+            ".container { display: flex; flex-direction: column; max-width: 1000px; margin: 0 auto; }",
+            ".tabs { display: flex; flex-wrap: wrap; background: var(--card); border-radius: 12px 12px 0 0; border: 1px solid var(--border); border-bottom: none; }",
+            ".tabs button { flex: 1; min-width: 120px; background: inherit; color: var(--text); border: none; padding: 15px; cursor: pointer; font-weight: bold; transition: 0.3s; }",
+            ".tabs button:hover { background: var(--hover); }",
+            ".tabs button.active { border-bottom: 3px solid var(--primary); color: var(--primary); }",
+            ".tabcontent { display: none; background: var(--card); padding: 25px; border: 1px solid var(--border); border-radius: 0 0 12px 12px; animation: fade 0.4s; }",
+            "@keyframes fade { from {opacity: 0;} to {opacity: 1;} }",
+            ".stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-bottom: 20px; }",
+            ".card { background: var(--accent); padding: 20px; border-radius: 10px; text-align: center; border: 1px solid var(--border); font-size: 16px; }",
+            ".card span { display: block; font-size: 24px; font-weight: bold; color: var(--primary); margin-top: 5px; }",
+            ".charts { display: flex; flex-wrap: wrap; gap: 20px; justify-content: space-around; margin-bottom: 20px; }",
+            ".chart-box { width: 300px; max-width: 100%; }",
+            "table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 14px; }",
+            "th, td { border: 1px solid var(--border); padding: 10px; text-align: left; }",
+            "th { background: var(--primary); color: #fff; }",
+            ".history-table th, .history-table td { padding: 8px; font-size: 13px; border: 1px solid var(--border); }",
+            "a { color: var(--primary); text-decoration: none; } a:hover { text-decoration: underline; }",
+            "</style></head><body>",
+            "<div class='container'><h2>🌌 AniVox Dashboard</h2><div class='tabs'>"
+        ]
+
+        tab_idx = 1
+        for pid, p in self.store.profiles.items():
+            name = (p.last_signature.split('|')[0].capitalize() if p.last_signature else "") or p.label or pid
+            html_doc.append(f"<button class='tablinks' onclick=\"openTab('id_{pid}')\">{tab_idx}. {html.escape(name)}</button>")
+            tab_idx += 1
+        html_doc.append("</div>")
+
+        tab_idx = 1
+        for pid, p in self.store.profiles.items():
+            name = (p.last_signature.split('|')[0].capitalize() if p.last_signature else "") or p.label or pid
+            entries = self.store.history.get(pid, [])
+            
+            w_h, on_h, off_h, titles, genres_time = calc_stats(entries, self.store.anime_cache)
+
+            html_doc.append(f"<div id='id_{pid}' class='tabcontent'>")
+            html_doc.append(f"<h3>👤 {tab_idx}. {html.escape(name)}</h3>")
+            
+            html_doc.append("<div class='stats-grid'>")
+            html_doc.append(f"<div class='card'>В аниме <span>{w_h} ч.</span></div>")
+            html_doc.append(f"<div class='card'>Онлайн <span>{on_h} ч.</span></div>")
+            html_doc.append(f"<div class='card'>Оффлайн <span>{off_h} ч.</span></div>")
+            html_doc.append("</div>")
+
+            html_doc.append("<div class='charts'>")
+            if w_h > 0 or on_h > 0 or off_h > 0:
+                html_doc.append(f"<div class='chart-box'><canvas id='c1_{pid}'></canvas></div>")
+                html_doc.append(f"<script>try{{new Chart(document.getElementById('c1_{pid}'), {{type:'doughnut', data:{{labels:['Смотрит','Онлайн','Оффлайн'], datasets:[{{data:[{w_h},{on_h},{off_h}], backgroundColor:['#bb86fc','#03dac6','#cf6679']}}]}}, options:{{plugins:{{legend:{{position:'bottom'}}}}}} }});}}catch(e){{}}</script>")
+            
+            if genres_time:
+                g_lbls = [f"'{g}'" for g, _ in sorted(genres_time.items(), key=lambda x: x[1], reverse=True)[:6]]
+                g_data = [str(round(v,1)) for _, v in sorted(genres_time.items(), key=lambda x: x[1], reverse=True)[:6]]
+                html_doc.append(f"<div class='chart-box'><canvas id='c2_{pid}'></canvas></div>")
+                html_doc.append(f"<script>try{{new Chart(document.getElementById('c2_{pid}'), {{type:'polarArea', data:{{labels:[{','.join(g_lbls)}], datasets:[{{label:'Часов', data:[{','.join(g_data)}], backgroundColor:'rgba(187, 134, 252, 0.5)'}}]}}, options:{{plugins:{{legend:{{position:'bottom'}}}}, scales:{{r:{{ticks:{{display:false}}}}}} }} }});}}catch(e){{}}</script>")
+            html_doc.append("</div>")
+
+            if titles:
+                html_doc.append("<h4>🏆 Топ тайтлов:</h4><table><tr><th>Тайтл</th><th>Жанры</th><th>Часы</th></tr>")
+                for t, hrs in sorted(titles.items(), key=lambda x: x[1], reverse=True):
+                    gnrs, link = get_anime_data(t, self.store.anime_cache)
+                    html_doc.append(f"<tr><td><a href='{link}' target='_blank'>{html.escape(t)}</a></td><td><small>{html.escape(gnrs)}</small></td><td><b>{round(hrs,1)}</b></td></tr>")
+                html_doc.append("</table><br>")
+
+            if entries:
+                html_doc.append("<h4>📈 История (до 50):</h4><table class='history-table'><tr><th>#</th><th>Дата (Алматы)</th><th>Статус</th></tr>")
+                hist_idx = 1
+                for e in reversed(entries[-50:]):
+                    try:
+                        dt_str = datetime.fromisoformat(e.get("checked_at", "")).strftime("%d.%m %H:%M")
+                    except:
+                        dt_str = e.get("checked_at", "")
+                        
+                    presence = str(e.get('presence', ''))
+                    
+                    if presence.startswith("Смотрит:"):
+                        title_part = presence.replace("Смотрит: ", "").strip()
+                        _, link = get_anime_data(title_part, self.store.anime_cache)
+                        presence_html = f"Смотрит: <a href='{link}' target='_blank'>{html.escape(title_part)}</a>"
+                    else:
+                        presence_html = html.escape(presence)
+                        
+                    html_doc.append(f"<tr><td>{hist_idx}</td><td>{dt_str}</td><td>{presence_html}</td></tr>")
+                    hist_idx += 1
+                html_doc.append("</table>")
+            
+            html_doc.append("</div>")
+            tab_idx += 1
+
+        js = """
+        <script>
+        function openTab(id) {
+            try {
+                var t = document.getElementsByClassName('tabcontent');
+                for(var i=0;i<t.length;i++) t[i].style.display='none';
+                var l = document.getElementsByClassName('tablinks');
+                for(var i=0;i<l.length;i++) l[i].className = l[i].className.replace(' active','');
+                
+                var content = document.getElementById(id);
+                if(content) content.style.display='block';
+                
+                var btn = document.querySelector("button[onclick=\\"openTab('" + id + "')\\"]");
+                if(btn) btn.className += ' active';
+                
+                sessionStorage.setItem('activeTab_anivox', id);
+            } catch(err) {}
+        }
+
+        window.addEventListener('beforeunload', function() {
+            sessionStorage.setItem('scrollPos_anivox', window.scrollY);
+        });
+
+        document.addEventListener('DOMContentLoaded', function() {
+            try {
+                var activeId = sessionStorage.getItem('activeTab_anivox');
+                if (activeId && document.getElementById(activeId)) {
+                    openTab(activeId);
+                } else {
+                    var firstBtn = document.getElementsByClassName('tablinks')[0];
+                    if(firstBtn) {
+                        var match = firstBtn.getAttribute('onclick').match(/'([^']+)'/);
+                        if(match) openTab(match[1]);
+                    }
+                }
+                
+                var scrollPos = sessionStorage.getItem('scrollPos_anivox');
+                if (scrollPos) {
+                    window.scrollTo(0, parseInt(scrollPos));
+                }
+            } catch(err) {}
+        });
+        </script>
+        """
+        html_doc.append(js)
+        html_doc.append("</div></body></html>")
+        
+        path.write_text("\n".join(html_doc), encoding="utf-8")
+        
+        if chat_id:
+            try:
+                self.telegram.send_document(
+                    chat_id, 
+                    path, 
+                    caption="🌐 Нейро-Отчет обновлен! Можете открыть этот файл или перейти по адресу: http://78.154.103.11:15887/anivox_report.html в браузере вашего телефона."
+                )
+            except Exception as exc:
+                self.telegram.send_message(chat_id, f"❌ Ошибка отправки отчета: {exc}")
+
+    def enforce_cleanup(self) -> None:
+        days = self.store.settings.auto_cleanup_days
+        if days <= 0:
+            return
+        cutoff = time.time() - (days * 86400)
+        for profile_id, entries in self.store.history.items():
+            cleaned = []
+            for entry in entries:
+                try:
+                    when = datetime.fromisoformat(entry.get("checked_at", "")).timestamp()
+                except (TypeError, ValueError):
+                    when = time.time()
+                if when >= cutoff:
+                    cleaned.append(entry)
+            self.store.history[profile_id] = cleaned
+        self.store.save()
+
+    def cleanup_history(self, args: str) -> str:
+        try:
+            days = max(1, min(3650, int(args or "30")))
+        except ValueError:
+            return "Пример: /cleanup 30"
+        cutoff = time.time() - days * 86400
+        removed = 0
+        for profile_id, entries in list(self.store.history.items()):
+            kept: list[dict[str, Any]] = []
+            for entry in entries:
+                try:
+                    when = datetime.fromisoformat(entry.get("checked_at", "")).timestamp()
+                except (TypeError, ValueError):
+                    when = time.time()
+                if when >= cutoff:
+                    kept.append(entry)
+                else:
+                    removed += 1
+            self.store.history[profile_id] = kept
+        self.store.save()
+        return f"Удалено записей старше {days} дн.: {removed}."
+
+    def send_settings_menu(self, chat_id: str, message_id: int = None) -> None:
+        if chat_id != self.store.chat_id:
+            self.telegram.send_message(chat_id, "❌ Настройки может менять только владелец бота.")
+            return
+            
+        s = self.store.settings
+        kb = {"inline_keyboard": [
+            [{"text": f"⏱ Интервал: {s.interval_minutes} мин", "callback_data": "ignore"}],
+            [{"text": "1", "callback_data": "set_int_1"}, {"text": "5", "callback_data": "set_int_5"}, {"text": "10", "callback_data": "set_int_10"}, {"text": "30", "callback_data": "set_int_30"}],
+            [{"text": f"🧹 Очистка истории: {s.auto_cleanup_days} дн.", "callback_data": "ignore"}],
+            [{"text": "5 дн", "callback_data": "set_cln_5"}, {"text": "15 дн", "callback_data": "set_cln_15"}, {"text": "30 дн", "callback_data": "set_cln_30"}, {"text": "Выкл", "callback_data": "set_cln_0"}]
+        ]}
+        text = "⚙️ <b>Панель управления (Владелец)</b>\nМеняйте параметры в один клик:"
+        if message_id:
+            self.telegram.edit_message_text(chat_id, text, message_id, kb)
+        else:
+            self.telegram.send_message(chat_id, text, kb)
+
+    def send_notifications_menu(self, chat_id: str, message_id: int = None) -> None:
+        if chat_id != self.store.chat_id:
+            self.telegram.send_message(chat_id, "❌ Настройки уведомлений может менять только владелец.")
+            return
+        
+        s = self.store.settings
+        kb = {"inline_keyboard": [
+            [{"text": f"{'✅' if s.notify_on_online else '❌'} Онлайн", "callback_data": "ntf_onl"},
+             {"text": f"{'✅' if s.notify_on_offline else '❌'} Оффлайн", "callback_data": "ntf_off"}],
+            [{"text": f"{'✅' if s.notify_on_title else '❌'} Смена тайтла", "callback_data": "ntf_ttl"},
+             {"text": f"{'✅' if s.notify_on_errors else '❌'} Ошибки", "callback_data": "ntf_err"}],
+            [{"text": f"{'🔔' if s.notify_on_change else '🔕'} ГЛАВНЫЙ РУБИЛЬНИК ({'ВКЛ' if s.notify_on_change else 'ВЫКЛ'})", "callback_data": "ntf_all"}]
+        ]}
+        text = "🔕 <b>Настройка уведомлений</b>\nВыберите, о чем бот должен вам писать:"
+        if message_id:
+            self.telegram.edit_message_text(chat_id, text, message_id, kb)
+        else:
+            self.telegram.send_message(chat_id, text, kb)
+
+    def command(self, chat_id: str, is_owner: bool, command: str, args: str) -> str:
+        if command in {"/start", "/help"}:
+            return (
+                "<b>AniVox Monitor v4.5.0</b>\n\n"
+                "<code>/add &lt;ссылка&gt; [метка]</code> — добавить профиль\n"
+                "<code>/list</code> — список профилей\n"
+                "<code>/remove &lt;id&gt;</code> — удалить профиль\n"
+                "<code>/check [id|all]</code> — принудительная проверка\n"
+                "<code>/history [id] [кол-во]</code> — показать историю\n"
+                "<code>/report</code> (или /site) — сгенерировать HTML-отчет\n"
+                "<code>/find &lt;текст&gt;</code> — поиск в истории\n"
+                "<code>/settings</code> — меню настроек\n"
+                "<code>/notifications</code> — настройка уведомлений\n"
+                "<code>/friends</code> — управление друзьями"
+            )
+        if command == "/list":
+            if not self.store.profiles:
+                return "Профилей нет. Владелец должен добавить их через /add."
+            idx = 1
+            out = ["<b>Мои профили:</b>"]
+            for p in self.store.profiles.values():
+                out.append(f"<b>{idx}.</b> <code>{p.profile_id}</code> — {html.escape(p.label or p.url)} — {html.escape(p.last_status or 'не проверялся')}")
+                idx += 1
+            return "\n".join(out)
+        if command == "/add":
+            if not is_owner: return "Добавлять профили может только владелец."
+            parts = args.split(maxsplit=1)
+            if not parts:
+                return "Пример: /add https://anivox.fun/profile/27788 метка"
+            try:
+                url, profile_id = normalize_profile_url(parts[0])
+            except ValueError as exc:
+                return str(exc)
+            existing = self.store.profiles.get(profile_id)
+            profile = existing or Profile(url=url, profile_id=profile_id)
+            profile.url = url
+            if len(parts) > 1:
+                profile.label = parts[1].strip()
+            self.store.profiles[profile_id] = profile
+            self.store.save()
+            self.check_requested.set()
+            return f"Профиль {profile_id} {'обновлён' if existing else 'добавлен'}."
+        if command == "/remove":
+            if not is_owner: return "Удалять профили может только владелец."
+            profile_id = args.split()[0] if args else ""
+            if profile_id in self.store.profiles:
+                del self.store.profiles[profile_id]
+                self.store.save()
+                return f"Профиль {profile_id} удалён."
+            return "Профиль не найден."
+        if command == "/check":
+            target = (args or "all").lower()
+            profiles = (
+                list(self.store.profiles.values())
+                if target == "all"
+                else [self.store.profiles[target]]
+                if target in self.store.profiles
+                else []
+            )
+            if not profiles:
+                return "Профиль не найден или список пуст."
+                
+            results = [self.check_one(profile, False) for profile in profiles]
+            return "\n\n".join(
+                format_profile(result, self.store.anime_cache, self.store.profiles[result.profile_id].label)
+                if result.ok else f"❌ {html.escape(result.url)}\n{html.escape(result.error)}"
+                for result in results
+            )
+        if command == "/history":
+            return self.history_text(args)
+        if command == "/summary":
+            return self.summary_text()
+        if command in {"/html", "/report", "/site"}:
+            self.telegram.send_message(chat_id, "⏳ Генерирую дашборд с графиками...")
+            self.generate_html_report(chat_id)
+            return ""
+        if command in {"/find", "/search"}:
+            return self.search_text(args)
+        if command in {"/probe", "/test"}:
+            return self.probe_text()
+        if command == "/export":
+            return self.export_history(chat_id)
+        if command == "/cleanup":
+            if not is_owner: return "Только владелец."
+            return self.cleanup_history(args)
+        if command == "/settings":
+            self.send_settings_menu(chat_id)
+            return ""
+        if command in {"/notifications", "/notif"}:
+            self.send_notifications_menu(chat_id)
+            return ""
+        if command == "/pause":
+            if not is_owner: return "Только владелец."
+            self.paused = True
+            return "⏸ Проверки приостановлены."
+        if command == "/resume":
+            if not is_owner: return "Только владелец."
+            self.paused = False
+            self.check_requested.set()
+            return "▶️ Проверки возобновлены."
+        if command in {"/friends", "/friend"}:
+            if not is_owner: return "Управлять друзьями может только владелец."
+            parts = args.split()
+            if len(parts) == 2 and parts[0] == "add":
+                f_id = parts[1].strip()
+                if f_id not in self.store.allowed_users: 
+                    self.store.allowed_users.append(f_id)
+                    self.store.save()
+                return f"✅ Пользователь <code>{f_id}</code> добавлен в Белый список! Теперь он будет получать уведомления и сможет использовать меню."
+            elif len(parts) == 2 and parts[0] == "remove":
+                f_id = parts[1].strip()
+                if f_id in self.store.allowed_users and f_id != self.store.chat_id: 
+                    self.store.allowed_users.remove(f_id)
+                    self.store.save()
+                return f"✅ Пользователь {f_id} удален."
+            else:
+                f_list = "\n".join([f"• <code>{u}</code>" for u in self.store.allowed_users])
+                return f"🎭 <b>Ваши друзья (имеют доступ к боту):</b>\n{f_list}\n\n<i>Для добавления:</i>\n<code>/friend add ID</code>\n<i>Для удаления:</i>\n<code>/friend remove ID</code>"
+        
+        return "Неизвестная команда. Используйте /help."
+
+    def authorized(self, message: dict[str, Any]) -> bool:
+        chat_id = str(message.get("chat", {}).get("id", ""))
+        return chat_id in self.store.allowed_users
+
+    def _handle_callback(self, cb: dict[str, Any]) -> None:
+        chat_id = str(cb.get("message", {}).get("chat", {}).get("id", ""))
+        data = cb.get("data", "")
+        query_id = cb.get("id")
+
+        if chat_id != self.store.chat_id:
+            self.telegram.answer_callback_query(query_id, "Настройки меняет только владелец!")
+            try:
+                # Уведомление, если друг попытался нажать скрытые кнопки
+                self.telegram.send_message(
+                    self.store.chat_id,
+                    f"🕵️‍♂️ Друг (ID <code>{chat_id}</code>) попытался нажать кнопку настроек: <b>{html.escape(data)}</b>"
+                )
+            except Exception:
+                pass
+            return
+
+        if data.startswith("set_int_"):
+            val = int(data.split("_")[-1])
+            self.store.settings.interval_minutes = val
+            self.store.save()
+            self.send_settings_menu(chat_id, cb.get("message", {}).get("message_id"))
+            self.telegram.answer_callback_query(query_id, f"Интервал изменен на {val} мин.")
+            self.check_requested.set()
+        elif data.startswith("set_cln_"):
+            val = int(data.split("_")[-1])
+            self.store.settings.auto_cleanup_days = val
+            self.store.save()
+            self.send_settings_menu(chat_id, cb.get("message", {}).get("message_id"))
+            self.telegram.answer_callback_query(query_id, f"Авто-очистка: {val} дн.")
+        elif data.startswith("ntf_"):
+            s = self.store.settings
+            if data == "ntf_onl": s.notify_on_online = not s.notify_on_online
+            elif data == "ntf_off": s.notify_on_offline = not s.notify_on_offline
+            elif data == "ntf_ttl": s.notify_on_title = not s.notify_on_title
+            elif data == "ntf_err": s.notify_on_errors = not s.notify_on_errors
+            elif data == "ntf_all": s.notify_on_change = not s.notify_on_change
+            self.store.save()
+            self.send_notifications_menu(chat_id, cb.get("message", {}).get("message_id"))
+            self.telegram.answer_callback_query(query_id, "Настройки уведомлений обновлены.")
+        else:
+            self.telegram.answer_callback_query(query_id, "Готово")
+
+    def handle_update(self, update: dict[str, Any]) -> None:
+        if "callback_query" in update:
+            self._handle_callback(update["callback_query"])
+            return
+
+        message = update.get("message", {})
+        if not isinstance(message, dict):
+            return
+            
+        chat_id = str(message.get("chat", {}).get("id", ""))
+        user_obj = message.get("from", {})
+        user_name = user_obj.get("username") or user_obj.get("first_name") or "Без имени"
+        
+        if chat_id not in self.store.allowed_users:
+            try:
+                self.telegram.send_message(
+                    self.store.chat_id,
+                    f"🚨 <b>Внимание! Новый пользователь стучится в бота:</b>\n"
+                    f"• Имя: {html.escape(str(user_name))}\n"
+                    f"• ID: <code>{chat_id}</code>\n\n"
+                    f"Чтобы дать ему доступ, отправьте:\n<code>/friend add {chat_id}</code>"
+                )
+            except Exception:
+                pass
+                
+            self.telegram.send_message(
+                chat_id, 
+                f"⛔️ Доступ ограничен. Ваш ID: <code>{chat_id}</code>.\nВладелец бота получил уведомление о вашем запросе."
+            )
+            return
+            
+        is_owner = (chat_id == self.store.chat_id)
+        text = compact(message.get("text", ""))
+
+        # УНИВЕРСАЛЬНЫЙ ПЕРЕХВАТЧИК: фиксирует всё, что нажимает/пишет друг, и отправляет только вам.
+        if not is_owner and text:
+            try:
+                self.telegram.send_message(
+                    self.store.chat_id,
+                    f"🕵️‍♂️ Друг (ID <code>{chat_id}</code>) нажал/написал:\n<b>{html.escape(text)}</b>"
+                )
+            except Exception:
+                pass
+
+        button_commands = {
+            "📊 Проверить всех": "/check all",
+            "👥 Мои профили": "/list",
+            "🌐 Открыть сайт-отчет": "/report",
+            "📈 История": "/history",
+            "⚙️ Настройки": "/settings",
+            "🔕 Уведомления": "/notifications",
+            "🧪 Тест связи": "/probe",
+            "⏸ Пауза": "/pause",
+            "▶️ Продолжить": "/resume",
+            "🎭 Друзья": "/friends"
+        }
+        
+        if text in button_commands:
+            text = button_commands[text]
+            
+        if text == "➕ Добавить":
+            self.telegram.send_message(chat_id, "Для добавления отправьте:\n<code>/add https://anivox.fun/profile/27788 метка</code>")
+            return
+        if text == "🗑 Удалить":
+            self.telegram.send_message(chat_id, "Для удаления отправьте:\n<code>/remove ID</code>")
+            return
+        if text == "🔍 Поиск":
+            self.telegram.send_message(chat_id, "Для поиска отправьте:\n<code>/find текст</code>")
+            return
+
+        command, _, args = text.partition(" ")
+        command = command.lower().split("@", 1)[0]
+        response = self.command(chat_id, is_owner, command, args.strip())
+        if response:
+            try:
+                self.telegram.send_message(chat_id, response)
+            except TelegramError as exc:
+                logger.warning("Не удалось ответить в Telegram: %s", exc)
+
+    def run(self) -> None:
+        while not self.stop_event.is_set():
+            try:
+                for update in self.telegram.get_updates(timeout=2):
+                    self.handle_update(update)
+            except TelegramError as exc:
+                logger.warning("Сбой сети Telegram, жду 5с: %s", exc)
+                self.stop_event.wait(5)
+            except Exception as exc:
+                logger.error("Критическая ошибка цикла: %s", exc)
+                self.stop_event.wait(5)
+            self.stop_event.wait(1)
+
+    def run_scheduler(self) -> None:
+        last_cleanup = 0.0
+        while not self.stop_event.is_set():
+            try:
+                if time.time() - last_cleanup > 3600:
+                    self.enforce_cleanup()
+                    last_cleanup = time.time()
+
+                if not self.paused:
+                    logger.info(
+                        "Автопроверка: профилей=%s, интервал=%s мин.",
+                        len(self.store.profiles),
+                        self.store.settings.interval_minutes,
+                    )
+                    self.check_all(True)
+                    self.generate_html_report(None)
+                    
+            except Exception as exc:
+                logger.error("Ошибка во время автопроверки: %s", exc, exc_info=True)
+
+            interval_sec = max(10, self.store.settings.interval_minutes * 60)
+            self.check_requested.wait(timeout=interval_sec)
+            if self.check_requested.is_set():
+                self.check_requested.clear()
+
+def prompt(label: str) -> str:
+    while True:
+        value = input(label).strip()
+        if value:
+            return value
+        print("Значение не может быть пустым.")
+
+def run_self_test() -> int:
+    print(f"{APP_NAME} {VERSION} — автономная проверка")
+    checks = [
+        (
+            "получение реального публичного профиля через WebSocket",
+            lambda: _test_live_profile(),
+        ),
+        (
+            "разбор ссылки",
+            lambda: normalize_profile_url("https://anivox.fun/profile/27788")
+            == ("https://anivox.fun/profile/27788", "27788"),
+        ),
+        ("сохранение настроек", _test_store),
+    ]
+    failed = 0
+    for name, check in checks:
+        try:
+            result = check()
+            if not result:
+                raise AssertionError("проверка вернула False")
+            print(f"  OK  {name}")
+        except Exception as exc:
+            failed += 1
+            print(f"  FAIL {name}: {exc}")
+    print(f"Результат: {len(checks) - failed}/{len(checks)} проверок.")
+    return 1 if failed else 0
+
+def _test_live_profile() -> bool:
+    url, profile_id = normalize_profile_url("https://anivox.fun/profile/27788")
+    result = fetch_profile(Profile(url=url, profile_id=profile_id), timeout=20)
+    print(format_profile(result, {}))
+    return result.ok and result.nickname != "неизвестно" and result.level != "неизвестно"
+
+def _test_store() -> bool:
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "state.json"
+        store = Store(path)
+        store.profiles["27788"] = Profile(
+            "https://anivox.fun/profile/27788", "27788"
+        )
+        store.save()
+        return "27788" in Store(path).profiles
+
+def main() -> int:
+    if "--self-test" in sys.argv[1:]:
+        return run_self_test()
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=[
+            logging.StreamHandler(sys.stdout),
+            logging.FileHandler(LOG_PATH, encoding="utf-8"),
+        ],
+    )
+    store = Store(CONFIG_PATH)
+    if not store.token:
+        store.token = prompt("Токен Telegram-бота: ")
+    if not store.chat_id:
+        store.chat_id = prompt("Ваш chat ID: ")
+    store.save()
+    telegram = TelegramClient(store.token)
+    try:
+        account = telegram.get_me()
+    except TelegramError as exc:
+        print(f"Ошибка проверки токена: {exc}")
+        return 2
+    print(f"Бот подтверждён: @{account.get('username', 'без username')}")
+    monitor = Monitor(store, telegram)
+    signal.signal(signal.SIGINT, monitor.stop)
+    signal.signal(signal.SIGTERM, monitor.stop)
+    try:
+        telegram.send_message(
+            store.chat_id,
+            f"✅ <b>AniVox Monitor {VERSION} запущен.</b>\n"
+            "Архитектура АНТИ-ФРИЗ включена. Ссылки на тайтлы теперь генерируются по ID прямо на сайт AniVox.",
+            reply_markup=TELEGRAM_KEYBOARD,
+        )
+    except TelegramError as exc:
+        logger.warning("Стартовое сообщение не отправилось: %s", exc)
+        
+    threading.Thread(
+        target=run_web_server,
+        daemon=True,
+    ).start()
+    
+    scheduler = threading.Thread(
+        target=monitor.run_scheduler,
+        name="anivox-scheduler",
+        daemon=True,
+    )
+    scheduler.start()
+    try:
+        monitor.run()
+    finally:
+        monitor.stop()
+        scheduler.join(timeout=5)
+        store.save()
+    return 0
+
+if __name__ == "__main__":
+    raise SystemExit(main())
