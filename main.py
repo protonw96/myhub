@@ -751,11 +751,9 @@ def changed_fields(old: str, result: FetchResult) -> list[str]:
     ):
         changes.append("тайтл")
     return changes
-
 class QuietHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
-    """Скрывает назойливые логи локального сервера и перенаправляет на отчет."""
+    """Скрывает логи сервера и правильно отдает сайт для Render."""
     def do_GET(self):
-        # На Render при заходе по ссылке нужно сразу отдавать этот файл
         if self.path in ("/", "/index.html"):
             self.path = "/anivox_report.html"
         return super().do_GET()
@@ -764,18 +762,32 @@ class QuietHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
         pass
 
 def run_web_server():
-    """Запускает веб-сервер для Render."""
-    # Render автоматически выдает порт, считываем его. Если портов нет — ставим 15887
+    """Запускает веб-сервер, слушая динамический порт Render (или 15887)."""
     port = int(os.getenv("PORT", 15887))
     work_dir = os.path.dirname(os.path.abspath(CONFIG_PATH))
     os.chdir(work_dir)
     try:
         socketserver.TCPServer.allow_reuse_address = True
-        # "0.0.0.0" означает, что сервер будет принимать трафик от Render, а не только локальный
         with socketserver.TCPServer(("0.0.0.0", port), QuietHTTPRequestHandler) as httpd:
-            logger.info(f"Web-сервер успешно запущен на порту {port} (0.0.0.0)")
+            logger.info(f"Web-сервер запущен на порту {port}")
             httpd.serve_forever()
     except Exception as e:
+        logger.error(f"Ошибка запуска Web-сервера: {e}")
+
+def keep_awake_ping():
+    """Фоновый пингер: стучится на свой же сайт раз в 10 минут, чтобы Render не уснул."""
+    render_url = os.getenv("RENDER_EXTERNAL_URL")
+    if not render_url:
+        return
+    while True:
+        try:
+            time.sleep(600) # Ждем 10 минут
+            req = urllib.request.Request(render_url, headers={"User-Agent": DEFAULT_USER_AGENT})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                pass
+        except Exception:
+            pass
+
         logger.error(f"Ошибка запуска Web-сервера: {e}")
 class Monitor:
     def __init__(self, store: Store, telegram: TelegramClient) -> None:
@@ -1600,17 +1612,20 @@ def main() -> int:
     except TelegramError as exc:
         logger.warning("Стартовое сообщение не отправилось: %s", exc)
         
-    threading.Thread(
-        target=run_web_server,
-        daemon=True,
-    ).start()
+      # 1. Запуск веб-сервера (для сайта)
+    threading.Thread(target=run_web_server, daemon=True).start()
     
+    # 2. Запуск фонового пингера (чтобы не спал)
+    threading.Thread(target=keep_awake_ping, daemon=True).start()
+    
+    # 3. Запуск планировщика проверок аниме
     scheduler = threading.Thread(
         target=monitor.run_scheduler,
         name="anivox-scheduler",
         daemon=True,
     )
     scheduler.start()
+
     try:
         monitor.run()
     finally:
