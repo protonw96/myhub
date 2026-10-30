@@ -6,6 +6,8 @@ import os
 import random
 import re
 import secrets
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -29,7 +31,9 @@ def load_tok_config():
         try:
             with open(TOK_FILE, "r", encoding="utf-8") as f:
                 file_cfg = json.load(f)
-                if file_cfg.get("tg_bot_token") and "ВСТАВЬТЕ" not in file_cfg.get("tg_bot_token", ""):
+                if file_cfg.get("tg_bot_token") and "ВСТАВЬТЕ" not in file_cfg.get(
+                    "tg_bot_token", ""
+                ):
                     cfg["tg_bot_token"] = file_cfg["tg_bot_token"]
                 if file_cfg.get("render_url"):
                     cfg["render_url"] = file_cfg["render_url"]
@@ -49,6 +53,7 @@ TG_BOT_TOKEN = tok_config["tg_bot_token"]
 
 SESSION_FILE = "session.json"
 CLAIMED_FILE = "claimed_games.json"
+BACKUP_FILE = "bot.py.bak"
 CHECK_GIVEAWAYS_INTERVAL = 10 * 3600  # Проверка бесплатных раздач каждые 10 часов
 CHECK_DISCOUNTS_INTERVAL = 1800       # Проверка скидок и автопокупок каждые 30 минут
 
@@ -69,16 +74,28 @@ bot_status = {
     "last_discount_check": "Еще не выполнялась",
     "steam_ok": False,
     "claimed_count": 0,
-    "autobuy_tasks": set(),  # Хранит AppID игр, которые уже ждут таймер 5-10 мин
+    "autobuy_tasks": set(),
 }
 
 pending_auth = {}
-calc_state = {}      # Хранит состояние калькулятора скидок для пользователя
-library_cache = {}   # Кэш всех игр библиотеки
+calc_state = {}
+library_cache = {}
+
+# Буфер для приёма многочастного кода при автообновлении через Telegram
+update_sessions = {}  # {chat_id: {"active": bool, "chunks": list, "status_msg_id": int}}
 
 
 # ----------------- СЕССИЯ И БАЗА -----------------
 def load_session():
+    if os.path.exists(SESSION_FILE):
+        try:
+            with open(SESSION_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if data:
+                    return data
+        except Exception:
+            pass
+
     env_b64 = os.environ.get("SESSION_BASE64")
     if env_b64:
         try:
@@ -89,13 +106,6 @@ def load_session():
             return data
         except Exception as e:
             print(f"[!] Ошибка чтения SESSION_BASE64: {e}")
-
-    if os.path.exists(SESSION_FILE):
-        try:
-            with open(SESSION_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
     return {}
 
 
@@ -133,7 +143,6 @@ class SteamClient:
         if "render_url" not in self.data:
             self.data["render_url"] = tok_config["render_url"]
         if "watchlist" not in self.data:
-            # Формат: {appid: {"name": str, "target_disc": int, "mode": "notify"|"autobuy"|"any", "last_discount": int}}
             self.data["watchlist"] = {}
         if "silent_mode" not in self.data:
             self.data["silent_mode"] = False
@@ -146,7 +155,6 @@ class SteamClient:
         return bool(self.data.get("refresh_token") and self.data.get("steamid"))
 
     def atomic_login(self, username, password, guard_code):
-        """Мгновенный пакетный вход для защиты от гео-блокировки."""
         try:
             rsa_url = "https://api.steampowered.com/IAuthenticationService/GetPasswordRSAPublicKey/v1/"
             r = requests.get(
@@ -291,7 +299,6 @@ class SteamClient:
         }
 
     def get_wallet_balance(self):
-        """Парсит текущий баланс кошелька Steam (в тенге или другой валюте аккаунта)."""
         if not self.is_configured():
             return "Не авторизован"
         try:
@@ -304,9 +311,13 @@ class SteamClient:
             )
             if r.status_code == 200:
                 bot_status["steam_ok"] = True
-                m = re.search(r'class="accountData price"[^>]*>(.*?)</div>', r.text, re.DOTALL)
+                m = re.search(
+                    r'class="accountData price"[^>]*>(.*?)</div>', r.text, re.DOTALL
+                )
                 if not m:
-                    m = re.search(r'id="header_wallet_balance"[^>]*>(.*?)</a>', r.text, re.DOTALL)
+                    m = re.search(
+                        r'id="header_wallet_balance"[^>]*>(.*?)</a>', r.text, re.DOTALL
+                    )
                 if m:
                     bal = re.sub(r"<[^>]+>", "", m.group(1)).strip()
                     return html.unescape(bal)
@@ -321,7 +332,6 @@ class SteamClient:
         return bot_status["steam_ok"], bal
 
     def update_profile_field(self, summary=None, persona_name=None, real_name=None):
-        """Редактирует 'О себе', Никнейм или Настоящее имя в профиле Steam."""
         steamid = self.data["steamid"]
         cookies = self.get_cookies()
         headers = {
@@ -368,10 +378,6 @@ class SteamClient:
         return r.status_code == 200
 
     def get_all_licenses(self):
-        """
-        Парсит ВСЕ игры в библиотеке аккаунта Steam (как купленные, так и бесплатные).
-        Купленные помечаются removable=False (нельзя удалить), бесплатные removable=True.
-        """
         url = "https://store.steampowered.com/account/licenses/?l=russian"
         try:
             r = requests.get(
@@ -397,7 +403,6 @@ class SteamClient:
                 removable = bool(m)
                 pkg_id = m.group(1) if m else "0"
 
-                # Очищаем название игры от кнопки "Удалить"
                 td_item_clean = re.sub(r"<div.*?</div>", "", tds[1], flags=re.DOTALL)
                 title = html.unescape(re.sub(r"<[^>]+>", "", td_item_clean)).strip()
                 if not title and m:
@@ -420,7 +425,6 @@ class SteamClient:
             return []
 
     def get_purchase_history(self):
-        """Парсит последние 10 транзакций/покупок аккаунта Steam."""
         url = "https://store.steampowered.com/account/history/?l=russian"
         try:
             r = requests.get(
@@ -441,9 +445,25 @@ class SteamClient:
                 items_m = re.search(r'class="wht_items"[^>]*>(.*?)</td>', row, re.DOTALL)
                 total_m = re.search(r'class="wht_total"[^>]*>(.*?)</td>', row, re.DOTALL)
 
-                date_s = html.unescape(re.sub(r"<[^>]+>", "", date_m.group(1)).strip()) if date_m else "—"
-                item_s = html.unescape(re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", items_m.group(1))).strip()) if items_m else "Операция"
-                total_s = html.unescape(re.sub(r"<[^>]+>", "", total_m.group(1)).strip()) if total_m else "0 ₸"
+                date_s = (
+                    html.unescape(re.sub(r"<[^>]+>", "", date_m.group(1)).strip())
+                    if date_m
+                    else "—"
+                )
+                item_s = (
+                    html.unescape(
+                        re.sub(
+                            r"\s+", " ", re.sub(r"<[^>]+>", " ", items_m.group(1))
+                        ).strip()
+                    )
+                    if items_m
+                    else "Операция"
+                )
+                total_s = (
+                    html.unescape(re.sub(r"<[^>]+>", "", total_m.group(1)).strip())
+                    if total_m
+                    else "0 ₸"
+                )
 
                 records.append(f"📅 `{date_s}` — **{item_s[:38]}** (`{total_s}`)")
             return records
@@ -451,25 +471,27 @@ class SteamClient:
             return []
 
     def redeem_cd_key(self, key_str):
-        """Активирует ключ продукта Steam (XXXXX-XXXXX-XXXXX) на аккаунте."""
         url = "https://store.steampowered.com/account/ajaxregisterkey/"
         headers = {
             "User-Agent": USER_AGENT,
             "Referer": "https://store.steampowered.com/account/registerkey",
             "X-Requested-With": "XMLHttpRequest",
         }
-        payload = {
-            "product_key": key_str.strip(),
-            "sessionid": self.session_id,
-        }
+        payload = {"product_key": key_str.strip(), "sessionid": self.session_id}
         try:
             r = requests.post(
-                url, data=payload, cookies=self.get_cookies(), headers=headers, timeout=15
+                url,
+                data=payload,
+                cookies=self.get_cookies(),
+                headers=headers,
+                timeout=15,
             ).json()
             success = r.get("success") == 1
             receipt = r.get("purchase_receipt_info", {})
             items = receipt.get("line_items", [])
-            game_names = ", ".join([i.get("line_item_description", "Игра") for i in items])
+            game_names = ", ".join(
+                [i.get("line_item_description", "Игра") for i in items]
+            )
             return {"ok": success, "games": game_names, "raw": r}
         except Exception as e:
             return {"ok": False, "error": str(e)}
@@ -484,7 +506,11 @@ class SteamClient:
         payload = {"sessionid": self.session_id, "packageid": str(package_id)}
         try:
             r = requests.post(
-                url, data=payload, cookies=self.get_cookies(), headers=headers, timeout=15
+                url,
+                data=payload,
+                cookies=self.get_cookies(),
+                headers=headers,
+                timeout=15,
             )
             if r.status_code == 200:
                 return r.json().get("success") == 1
@@ -550,7 +576,6 @@ class SteamClient:
         return r1.status_code == 200 or r2.status_code == 200
 
     def get_game_price_info(self, app_id):
-        """Получает подробную цену игры в ТЕНГЕ (₸) по AppID."""
         url = f"https://store.steampowered.com/api/appdetails?appids={app_id}&cc=kz&l=ru"
         try:
             r = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=15).json()
@@ -600,13 +625,14 @@ class SteamClient:
                 "initial_kzt": initial_kzt,
                 "final_kzt": final_kzt,
                 "final_formatted": price_ov.get("final_formatted", f"{final_kzt:g} ₸"),
-                "initial_formatted": price_ov.get("initial_formatted", f"{initial_kzt:g} ₸"),
+                "initial_formatted": price_ov.get(
+                    "initial_formatted", f"{initial_kzt:g} ₸"
+                ),
             }
         except Exception:
             return None
 
     def search_games_by_name(self, query):
-        """Умный поиск игр в Steam по названию с ценами в тенге (KZ)."""
         url = "https://store.steampowered.com/api/storesearch/"
         params = {"term": query, "l": "russian", "cc": "kz"}
         try:
@@ -622,7 +648,9 @@ class SteamClient:
                 if price_info:
                     final_kzt = price_info.get("final", 0) / 100.0
                     disc = price_info.get("discount_percent", 0)
-                    price_str = f"{final_kzt:g} ₸" + (f" (-{disc}%)" if disc > 0 else "")
+                    price_str = f"{final_kzt:g} ₸" + (
+                        f" (-{disc}%)" if disc > 0 else ""
+                    )
                 else:
                     price_str = "Бесплатно / Н/Д"
                 results.append({"appid": appid, "name": name, "price_str": price_str})
@@ -631,7 +659,6 @@ class SteamClient:
             return []
 
     def get_top_daily_specials(self):
-        """Получает топ актуальных скидок дня в Steam (в тенге)."""
         url = "https://store.steampowered.com/api/featuredcategories?cc=kz&l=ru"
         try:
             r = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=15).json()
@@ -655,17 +682,12 @@ class SteamClient:
             return []
 
     def auto_purchase_game(self, app_id, sub_id=None):
-        """
-        Автопокупка игры с кошелька Steam (или 100% скидки) + добавление в корзину.
-        """
         if not sub_id:
             sub_id = self.get_subid_from_appid(app_id)
         if not sub_id:
             return {"ok": False, "msg": "Не найден пакет (SubID) для покупки."}
 
-        # 1. Если скидка 100%, активируем как бесплатную лицензию
-        if self.add_free_license(sub_id):
-            pass
+        self.add_free_license(sub_id)
 
         cookies = self.get_cookies()
         headers = {
@@ -675,7 +697,6 @@ class SteamClient:
         }
 
         try:
-            # 2. Кладем игру в корзину аккаунта Steam
             cart_url = "https://store.steampowered.com/cart/"
             requests.post(
                 cart_url,
@@ -689,7 +710,6 @@ class SteamClient:
                 timeout=15,
             )
 
-            # 3. Инициализируем транзакцию через внутренний баланс Steam Wallet
             init_url = "https://store.steampowered.com/checkout/inittransaction/"
             init_payload = {
                 "gidShoppingCart": -1,
@@ -726,7 +746,7 @@ class SteamClient:
                 "ok": True,
                 "msg": (
                     "🛒 Игра автоматически положена в вашу корзину Steam! "
-                    "Перейдите в корзину (https://store.steampowered.com/cart/), чтобы подтвердить списание с кошелька."
+                    "Перейдите в корзину (https://store.steampowered.com/cart/), чтобы подтвердить списание."
                 ),
             }
         except Exception as e:
@@ -747,7 +767,6 @@ def is_admin(user_id):
 
 
 def notify_user(chat_id, text, reply_markup=None):
-    """Отправляет сообщение с учетом тихого режима (без звука)."""
     bot.send_message(
         chat_id,
         text,
@@ -758,7 +777,7 @@ def notify_user(chat_id, text, reply_markup=None):
     )
 
 
-# ----------------- ГЛАВНОЕ МЕНЮ (УДОБНАЯ ПАНЕЛЬ) -----------------
+# ----------------- ГЛАВНОЕ МЕНЮ -----------------
 def get_main_keyboard():
     kb = InlineKeyboardMarkup(row_width=2)
     if not steam.is_configured():
@@ -781,7 +800,7 @@ def get_main_keyboard():
             InlineKeyboardButton("🛠 Инструменты (10+)", callback_data="menu_tools"),
             InlineKeyboardButton("👤 Профиль и Баланс", callback_data="menu_profile"),
             InlineKeyboardButton("📡 Тихий пинг", callback_data="menu_ping"),
-            InlineKeyboardButton("⚙️ Система / Обновить", callback_data="menu_system"),
+            InlineKeyboardButton("🔄 Система / Обновить", callback_data="menu_system"),
         )
     return kb
 
@@ -799,14 +818,15 @@ def format_dashboard_text():
         else "Ожидание..."
     )
     watchlist_count = len(steam.data.get("watchlist", {}))
-    silent_str = "🌙 Вкл (Без звука)" if steam.data.get("silent_mode") else "🔔 Выкл (Со звуком)"
+    silent_str = "🌙 Вкл" if steam.data.get("silent_mode") else "🔔 Выкл"
+    upd_ver = steam.data.get("last_update_time", "Базовая сборка")
     return (
         f"🤖 **Панель управления Steam Ultimate**\n\n"
         f"👤 Аккаунт: `{steam.data.get('account_name')}`\n"
+        f"🏷 Версия кода: `{upd_ver}`\n"
         f"📉 Игр на радаре / автопокупке: `{watchlist_count}`\n"
         f"🎁 Забрано раздач за сеанс: `{bot_status['claimed_count']}`\n"
-        f"📡 Последний тихий пинг: `{ago}`\n"
-        f"🔕 Тихий режим: `{silent_str}`\n\n"
+        f"📡 Последний тихий пинг: `{ago}` | Тихий режим: `{silent_str}`\n\n"
         f"👇 Выберите нужный раздел:"
     )
 
@@ -834,12 +854,211 @@ def send_or_edit(chat_id, text, reply_markup, message_id=None):
     )
 
 
+# =====================================================================
+# НАДЕЖНЫЙ ДВИЖОК АВТООБНОВЛЕНИЯ (ФАЙЛ / МНОГОЧАСТНЫЙ ТЕКСТ / ССЫЛКА)
+# =====================================================================
+def apply_new_bot_code(chat_id, new_code):
+    """Проверяет синтаксис, сохраняет резервную копию, записывает bot.py и перезапускает воркер."""
+    new_code = new_code.strip()
+    new_code = re.sub(r"^```[a-zA-Z]*\n", "", new_code)
+    new_code = re.sub(r"\n```$", "", new_code)
+
+    if len(new_code) < 100:
+        notify_user(
+            chat_id,
+            "❌ Полученный код слишком короткий. Обновление отменено.",
+            reply_markup=get_main_keyboard(),
+        )
+        return False
+
+    # Сохраняем текущий рабочий токен, если в новом коде осталась заглушка
+    if "ВСТАВЬТЕ_СЮДА_ТОКЕН_БОТА" in new_code:
+        new_code = new_code.replace("ВСТАВЬТЕ_СЮДА_ТОКЕН_БОТА", TG_BOT_TOKEN)
+
+    # 1. Проверяем синтаксис Python до записи на диск
+    try:
+        compile(new_code, "bot.py", "exec")
+    except SyntaxError as e:
+        notify_user(
+            chat_id,
+            f"❌ **Ошибка синтаксиса в присланном коде!**\n"
+            f"Строка `{e.lineno}`: `{e.msg}`\n\n"
+            f"*(Если вы вставляли длинный код текстом и не все сообщения успели дойти, подождите 2 секунды и нажмите «✅ Установить собранный код» еще раз)*.",
+            reply_markup=get_main_keyboard(),
+        )
+        return False
+
+    # 2. Защищаем от конфликта портов Flask, если прислан старый вариант скрипта без BOT_WORKER_MODE
+    if "BOT_WORKER_MODE" not in new_code and "app.run(" in new_code:
+        new_code = new_code.replace(
+            "app.run(host=\"0.0.0.0\", port=port)",
+            "threading.Thread(target=lambda: app.run(host=\"0.0.0.0\", port=port), daemon=True).start()\n    while True:\n        time.sleep(3600)",
+        )
+
+    # 3. Создаем бэкап и перезаписываем bot.py
+    script_path = os.path.abspath(__file__)
+    try:
+        if os.path.exists(script_path):
+            shutil.copyfile(script_path, BACKUP_FILE)
+        with open(script_path, "w", encoding="utf-8") as f:
+            f.write(new_code)
+    except Exception as e:
+        notify_user(
+            chat_id,
+            f"❌ Ошибка записи файла на диск: {e}",
+            reply_markup=get_main_keyboard(),
+        )
+        return False
+
+    upd_time = time.strftime("%d.%m %H:%M:%S")
+    steam.data["last_update_time"] = f"Обновлен {upd_time}"
+    steam.data["just_updated"] = upd_time
+    save_session(steam.data)
+    update_sessions.pop(chat_id, None)
+
+    notify_user(
+        chat_id,
+        f"✅ **Код проверен и сохранен (`{len(new_code)}` символов)!**\n"
+        f"🔄 Перезапускаю рабочий процесс бота (2–3 секунды)... Бот сам напишет вам, когда запустится!",
+    )
+
+    def _graceful_restart():
+        time.sleep(1.0)
+        try:
+            bot.stop_polling()
+        except Exception:
+            pass
+        time.sleep(1.0)
+        # Если запущен под супервизором PID 1 — выходим с кодом 42, супервизор мгновенно поднимет новый bot.py
+        if os.environ.get("BOT_WORKER_MODE") == "1":
+            os._exit(42)
+        else:
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+
+    threading.Thread(target=_graceful_restart, daemon=True).start()
+    return True
+
+
+# Глобальный приём файлов .py / .txt в любой момент (даже без нажатия кнопки!)
+@bot.message_handler(content_types=["document"])
+def handle_document_update(message):
+    if not is_admin(message.from_user.id):
+        return
+    doc = message.document
+    fname = (doc.file_name or "").lower()
+    is_upd_active = update_sessions.get(message.chat.id, {}).get("active", False)
+
+    if fname.endswith(".py") or fname.endswith(".txt") or is_upd_active:
+        bot.send_message(
+            message.chat.id,
+            f"📥 Получен файл `{doc.file_name}`. Проверяю и устанавливаю обновление...",
+            parse_mode="Markdown",
+        )
+        try:
+            file_info = bot.get_file(doc.file_id)
+            raw_bytes = bot.download_file(file_info.file_path)
+            new_code = raw_bytes.decode("utf-8")
+            apply_new_bot_code(message.chat.id, new_code)
+        except Exception as e:
+            notify_user(
+                message.chat.id,
+                f"❌ Не удалось прочитать файл: {e}",
+                reply_markup=get_main_keyboard(),
+            )
+
+
+# Глобальный перехватчик текстовых кусков кода, когда включен режим обновления
+@bot.message_handler(
+    func=lambda m: update_sessions.get(m.chat.id, {}).get("active", False),
+    content_types=["text"],
+)
+def handle_chunked_update_text(message):
+    chat_id = message.chat.id
+    text = message.text.strip()
+
+    if text.lower() in ("отмена", "/cancel", "cancel"):
+        update_sessions.pop(chat_id, None)
+        notify_user(chat_id, "❎ Режим обновления отменен.", reply_markup=get_main_keyboard())
+        return
+
+    # Если прислали прямую ссылку на код (GitHub Raw / Pastebin / Gist)
+    if text.startswith("http://") or text.startswith("https://"):
+        if "\n" not in text and " " not in text:
+            bot.send_message(chat_id, "🌐 Скачиваю код по ссылке...")
+            try:
+                r = requests.get(text, headers={"User-Agent": USER_AGENT}, timeout=15)
+                if r.status_code == 200:
+                    apply_new_bot_code(chat_id, r.text)
+                    return
+            except Exception as e:
+                notify_user(chat_id, f"❌ Ошибка скачивания по ссылке: {e}")
+                return
+
+    # Иначе добавляем кусок текста в буфер (поддержка склейки из 1..15 сообщений Telegram)
+    sess = update_sessions[chat_id]
+    sess["chunks"].append(message.text)
+    full_code = "\n".join(sess["chunks"])
+    total_chars = len(full_code)
+    parts_count = len(sess["chunks"])
+
+    # Проверяем, компилируется ли уже склеенный код целиком
+    is_valid_syntax = False
+    try:
+        clean_test = re.sub(r"^```[a-zA-Z]*\n", "", full_code.strip())
+        clean_test = re.sub(r"\n```$", "", clean_test)
+        compile(clean_test, "bot.py", "exec")
+        is_valid_syntax = True
+    except SyntaxError:
+        is_valid_syntax = False
+
+    kb = InlineKeyboardMarkup(row_width=1)
+    kb.add(
+        InlineKeyboardButton(
+            f"✅ Установить собранный код ({parts_count} ч., {total_chars} симв.)",
+            callback_data="upd_apply_now",
+        ),
+        InlineKeyboardButton("🧹 Очистить буфер", callback_data="upd_clear_buf"),
+        InlineKeyboardButton("❌ Отмена", callback_data="upd_cancel"),
+    )
+
+    status_line = (
+        "🟢 **Синтаксис кода полностью корректен! Нажмите зеленую кнопку ниже для установки:**"
+        if is_valid_syntax
+        else "🟡 *Принимаю части кода... Дождитесь отправки всех частей и нажмите кнопку установки:*"
+    )
+
+    msg_text = (
+        f"📥 **Буфер автообновления:**\n"
+        f"• Принято сообщений (частей): `{parts_count}`\n"
+        f"• Общий размер кода: `{total_chars} символов`\n\n"
+        f"{status_line}"
+    )
+
+    # Обновляем одно статусное сообщение, чтобы не спамить на каждый кусок
+    if sess.get("status_msg_id"):
+        try:
+            bot.edit_message_text(
+                msg_text,
+                chat_id,
+                sess["status_msg_id"],
+                parse_mode="Markdown",
+                reply_markup=kb,
+            )
+            return
+        except Exception:
+            pass
+
+    sent = bot.send_message(chat_id, msg_text, parse_mode="Markdown", reply_markup=kb)
+    sess["status_msg_id"] = sent.message_id
+
+
 # ----------------- СТАРТ И НАВИГАЦИЯ -----------------
 @bot.message_handler(commands=["start", "menu"])
 def cmd_start(message):
     if not is_admin(message.from_user.id):
         bot.send_message(message.chat.id, "⛔ Доступ запрещен.")
         return
+    update_sessions.pop(message.chat.id, None)
     send_or_edit(message.chat.id, format_dashboard_text(), get_main_keyboard())
 
 
@@ -853,6 +1072,41 @@ def handle_callbacks(call):
     data = call.data
 
     if data == "back_main":
+        update_sessions.pop(chat_id, None)
+        send_or_edit(chat_id, format_dashboard_text(), get_main_keyboard(), msg_id)
+
+    # --- КНОПКИ УПРАВЛЕНИЯ БУФЕРОМ АВТООБНОВЛЕНИЯ ---
+    elif data == "update_bot":
+        update_sessions[chat_id] = {"active": True, "chunks": [], "status_msg_id": None}
+        kb = InlineKeyboardMarkup(row_width=1)
+        kb.add(InlineKeyboardButton("❌ Отменить обновление", callback_data="upd_cancel"))
+        send_or_edit(
+            chat_id,
+            "🔄 **Режим автообновления активирован!**\n\n"
+            "Выберите любой удобный способ:\n"
+            "1️⃣ **Вставьте код прямо в чат** (даже если Telegram разобьет его на 10 сообщений — бот склеит все части автоматически) и нажмите **«✅ Установить собранный код»**.\n"
+            "2️⃣ **Или отправьте файл `bot.py` / `.txt`** документом.\n"
+            "3️⃣ **Или отправьте прямую ссылку** на Raw-код.",
+            kb,
+            msg_id,
+        )
+
+    elif data == "upd_apply_now":
+        sess = update_sessions.get(chat_id)
+        if not sess or not sess.get("chunks"):
+            bot.answer_callback_query(call.id, "Буфер пуст! Сначала отправьте код в чат.", show_alert=True)
+            return
+        bot.answer_callback_query(call.id, "Проверяю и устанавливаю код...")
+        full_code = "\n".join(sess["chunks"])
+        apply_new_bot_code(chat_id, full_code)
+
+    elif data == "upd_clear_buf":
+        update_sessions[chat_id] = {"active": True, "chunks": [], "status_msg_id": None}
+        bot.answer_callback_query(call.id, "Буфер очищен! Можете отправить код заново.")
+
+    elif data == "upd_cancel":
+        update_sessions.pop(chat_id, None)
+        bot.answer_callback_query(call.id, "Обновление отменено")
         send_or_edit(chat_id, format_dashboard_text(), get_main_keyboard(), msg_id)
 
     # =================================================================
@@ -873,7 +1127,7 @@ def handle_callbacks(call):
             chat_id,
             "📚 **Полная библиотека вашего аккаунта Steam**\n\n"
             "• **📋 Все игры аккаунта** — показывает и купленные игры, и бесплатные.\n"
-            "• **🔒 Купленные игры** защищены от удаления (при нажатии покажут дату покупки).\n"
+            "• **🔒 Купленные игры** защищены от удаления.\n"
             "• **❌ Бесплатные игры** можно удалить с аккаунта в один клик.",
             kb,
             msg_id,
@@ -881,11 +1135,11 @@ def handle_callbacks(call):
 
     elif data.startswith("lib_view_"):
         parts = data.split("_")
-        mode = parts[2]  # all | paid | free
+        mode = parts[2]
         page = int(parts[3])
 
         if page == 0 or chat_id not in library_cache:
-            bot.answer_callback_query(call.id, "Загружаю все игры аккаунта из Steam...")
+            bot.answer_callback_query(call.id, "Загружаю игры аккаунта из Steam...")
             library_cache[chat_id] = steam.get_all_licenses()
 
         all_items = library_cache.get(chat_id, [])
@@ -905,7 +1159,6 @@ def handle_callbacks(call):
         chunk = items[page * per_page : (page + 1) * per_page]
 
         kb = InlineKeyboardMarkup(row_width=1)
-        # Кнопки быстрого переключения фильтра
         kb.row(
             InlineKeyboardButton(
                 f"{'🔘' if mode=='all' else '⚪'} Все ({len(all_items)})",
@@ -963,7 +1216,7 @@ def handle_callbacks(call):
     elif data.startswith("lib_locked_"):
         bot.answer_callback_query(
             call.id,
-            "🔒 Это купленная игра (или активированная ключом). Её нельзя удалить из библиотеки!",
+            "🔒 Это купленная игра (или активированная ключом). Её нельзя удалить!",
             show_alert=True,
         )
 
@@ -978,7 +1231,7 @@ def handle_callbacks(call):
                 library_cache[chat_id] = [
                     x for x in library_cache[chat_id] if x["packageid"] != pkg_id
                 ]
-            notify_user(chat_id, f"✅ Бесплатная игра (пакет `{pkg_id}`) удалена из библиотеки!")
+            notify_user(chat_id, f"✅ Бесплатная игра (пакет `{pkg_id}`) удалена!")
         else:
             notify_user(chat_id, f"❌ Не удалось удалить пакет `{pkg_id}`.")
         call.data = f"lib_view_{mode}_{page}"
@@ -990,7 +1243,9 @@ def handle_callbacks(call):
         lines = [f"Всего игр/лицензий на аккаунте: {len(items)}\n" + "=" * 50]
         for i, it in enumerate(items, 1):
             status = "[Бесплатная]" if it["removable"] else "[Куплена 🔒]"
-            lines.append(f"{i}. {it['name']} | {status} | Дата: {it['date']} | Тип: {it['method']}")
+            lines.append(
+                f"{i}. {it['name']} | {status} | Дата: {it['date']} | Тип: {it['method']}"
+            )
         bio_bytes = io.BytesIO("\n".join(lines).encode("utf-8"))
         bio_bytes.name = f"steam_library_{steam.data.get('account_name', 'user')}.txt"
         bot.send_document(
@@ -1007,8 +1262,7 @@ def handle_callbacks(call):
         msg = bot.send_message(
             chat_id,
             "🧮 **Калькулятор скидок в тенге (₸) и Автопокупка**\n\n"
-            "Отправьте **AppID** игры (например `1091500` для Cyberpunk 2077) или ссылку на игру в Steam.\n"
-            "*(Если не знаете AppID — воспользуйтесь кнопкой «🔎 Поиск игры» в меню)*:",
+            "Отправьте **AppID** игры (например `1091500` для Cyberpunk 2077) или ссылку на игру в Steam:",
             parse_mode="Markdown",
         )
         bot.register_next_step_handler(msg, step_calc_get_appid)
@@ -1019,9 +1273,8 @@ def handle_callbacks(call):
         show_game_and_ask_discount(chat_id, app_id)
 
     elif data.startswith("watch_set_"):
-        # watch_set_{mode}_{appid}_{target_disc}
         parts = data.split("_")
-        mode = parts[2]  # notify | autobuy | any
+        mode = parts[2]
         app_id = parts[3]
         target_disc = int(parts[4])
 
@@ -1043,9 +1296,8 @@ def handle_callbacks(call):
         if mode == "autobuy":
             mode_desc = (
                 f"🛒 **АВТОПОКУПКА (через 5–10 минут)** при скидке **-{target_disc}% и выше**!\n"
-                f"Как только в Steam появится эта скидка, бот выждет 5–10 минут и автоматически купит игру с кошелька Steam."
+                f"Как только в Steam появится эта скидка, бот выждет 5–10 минут и автоматически купит игру."
             )
-            # Если на игру УЖЕ сейчас действует нужная скидка — сразу запускаем таймер 5-10 мин!
             if cur_disc >= target_disc and app_id not in bot_status["autobuy_tasks"]:
                 threading.Thread(
                     target=trigger_delayed_autobuy,
@@ -1064,14 +1316,18 @@ def handle_callbacks(call):
         )
 
     # =================================================================
-    # 3. РАДАР СКИДОК (СПИСОК ОТСЛЕЖИВАНИЯ)
+    # 3. РАДАР СКИДОК
     # =================================================================
     elif data == "menu_discounts":
         watchlist = steam.data.get("watchlist", {})
         kb = InlineKeyboardMarkup(row_width=1)
         kb.add(
-            InlineKeyboardButton("🧮 Рассчитать скидку в ₸ / Добавить игру", callback_data="menu_calc"),
-            InlineKeyboardButton("🔍 Проверить цены по списку сейчас", callback_data="disc_check_now"),
+            InlineKeyboardButton(
+                "🧮 Рассчитать скидку в ₸ / Добавить игру", callback_data="menu_calc"
+            ),
+            InlineKeyboardButton(
+                "🔍 Проверить цены по списку сейчас", callback_data="disc_check_now"
+            ),
         )
         for appid, info in list(watchlist.items())[:8]:
             m_icon = "🛒 Автобай" if info.get("mode") == "autobuy" else "🔔 Увед."
@@ -1086,7 +1342,11 @@ def handle_callbacks(call):
         if watchlist:
             lines = []
             for k, v in watchlist.items():
-                m_str = "🛒 Автопокупка (5–10 мин)" if v.get("mode") == "autobuy" else "🔔 Только уведомление"
+                m_str = (
+                    "🛒 Автопокупка (5–10 мин)"
+                    if v.get("mode") == "autobuy"
+                    else "🔔 Только уведомление"
+                )
                 lines.append(
                     f"• **{v.get('name')}** (`{k}`)\n"
                     f"  └ Цель: `-{v.get('target_disc', 1)}%` | Режим: {m_str} | Посл. скидка: `{v.get('last_discount', 0)}%`"
@@ -1113,10 +1373,14 @@ def handle_callbacks(call):
     elif data == "disc_check_now":
         bot.answer_callback_query(call.id, "Проверяю цены в тенге...")
         rep = check_discounts(force_report=True)
-        notify_user(chat_id, rep or "ℹ️ Список отслеживания пуст.", reply_markup=get_main_keyboard())
+        notify_user(
+            chat_id,
+            rep or "ℹ️ Список отслеживания пуст.",
+            reply_markup=get_main_keyboard(),
+        )
 
     # =================================================================
-    # 4. УМНЫЙ ПОИСК ИГР И ТОП СКИДОК ДНЯ (В ТЕНГЕ)
+    # 4. ПОИСК И ТОП СКИДОК ДНЯ
     # =================================================================
     elif data == "menu_search":
         msg = bot.send_message(
@@ -1147,7 +1411,7 @@ def handle_callbacks(call):
         send_or_edit(chat_id, "\n".join(lines), kb, msg_id)
 
     # =================================================================
-    # 5. ДОПОЛНИТЕЛЬНЫЕ ИНСТРУМЕНТЫ (10+ ФУНКЦИЙ)
+    # 5. ДОПОЛНИТЕЛЬНЫЕ ИНСТРУМЕНТЫ
     # =================================================================
     elif data == "menu_tools":
         kb = InlineKeyboardMarkup(row_width=2)
@@ -1165,11 +1429,7 @@ def handle_callbacks(call):
         send_or_edit(
             chat_id,
             "🛠 **Дополнительные инструменты Steam**\n\n"
-            "• **🔑 Активировать ключ** — ввод CD-Key (`XXXXX-XXXXX-XXXXX`) прямо в чате.\n"
-            "• **🧾 История покупок** — последние 10 транзакций аккаунта.\n"
-            "• **🎲 Случайная игра** — выберет, во что поиграть из вашей библиотеки.\n"
-            "• **🕵️ Статус Steam и CS2** — проверка доступности серверов.\n"
-            "• **🚀 Пакет F2P-хитов** — добавит сразу 5 популярных бесплатных игр.",
+            "Выберите нужный инструмент:",
             kb,
             msg_id,
         )
@@ -1177,7 +1437,7 @@ def handle_callbacks(call):
     elif data == "tool_redeem_key":
         msg = bot.send_message(
             chat_id,
-            "🔑 Отправьте ключ продукта Steam (например `AAAAA-BBBBB-CCCCC`) для активации на вашем аккаунте:",
+            "🔑 Отправьте ключ продукта Steam (`AAAAA-BBBBB-CCCCC`) для активации:",
             parse_mode="Markdown",
         )
         bot.register_next_step_handler(msg, step_redeem_key)
@@ -1203,7 +1463,7 @@ def handle_callbacks(call):
         status_s = "Купленная игра 🔒" if not pick["removable"] else "Бесплатная игра"
         notify_user(
             chat_id,
-            f"🎲 **Случайный выбор игры на вечер:**\n\n"
+            f"🎲 **Случайный выбор игры:**\n\n"
             f"🎮 **{pick['name']}**\n"
             f"📅 Добавлена: `{pick['date']}` ({status_s})",
             reply_markup=get_main_keyboard(),
@@ -1215,8 +1475,14 @@ def handle_callbacks(call):
         store_ok = False
         comm_ok = False
         try:
-            store_ok = requests.get("https://store.steampowered.com/", timeout=10).status_code == 200
-            comm_ok = requests.get("https://steamcommunity.com/", timeout=10).status_code == 200
+            store_ok = (
+                requests.get("https://store.steampowered.com/", timeout=10).status_code
+                == 200
+            )
+            comm_ok = (
+                requests.get("https://steamcommunity.com/", timeout=10).status_code
+                == 200
+            )
         except Exception:
             pass
         ping_ms = int((time.time() - t0) * 500)
@@ -1224,7 +1490,7 @@ def handle_callbacks(call):
             f"🕵️ **Статус серверов Steam:**\n\n"
             f"🛒 Магазин Steam: `{'🟢 Онлайн' if store_ok else '🔴 Недоступен'}`\n"
             f"👥 Сообщество Steam: `{'🟢 Онлайн' if comm_ok else '🔴 Недоступно'}`\n"
-            f"🎮 Игровой координатор CS2 / Dota 2: `🟢 Штатный режим`\n"
+            f"🎮 Игровой координатор CS2: `🟢 Штатный режим`\n"
             f"⚡ Отклик API: `{ping_ms} мс`"
         )
         kb = InlineKeyboardMarkup().add(
@@ -1250,24 +1516,27 @@ def handle_callbacks(call):
         library_cache.pop(chat_id, None)
         notify_user(
             chat_id,
-            "✅ **Пакетное добавление завершено!**\n\n" + ("\n".join(added_names) or "Все игры уже на аккаунте."),
+            "✅ **Пакетное добавление завершено!**\n\n"
+            + ("\n".join(added_names) or "Все игры уже на аккаунте."),
             reply_markup=get_main_keyboard(),
         )
 
     elif data == "tool_toggle_silent":
         steam.data["silent_mode"] = not steam.data.get("silent_mode", False)
         save_session(steam.data)
-        state_txt = "Включен (без звука)" if steam.data["silent_mode"] else "Выключен (со звуком)"
+        state_txt = (
+            "Включен (без звука)" if steam.data["silent_mode"] else "Выключен (со звуком)"
+        )
         bot.answer_callback_query(call.id, f"Тихий режим: {state_txt}")
         send_or_edit(chat_id, format_dashboard_text(), get_main_keyboard(), msg_id)
 
     elif data == "tool_clear_cache":
         library_cache.clear()
         calc_state.clear()
-        bot.answer_callback_query(call.id, "🧹 Кэш библиотеки успешно очищен!", show_alert=True)
+        bot.answer_callback_query(call.id, "🧹 Кэш успешно очищен!", show_alert=True)
 
     # =================================================================
-    # 6. ПРОФИЛЬ И БАЛАНС КОШЕЛЬКА
+    # 6. ПРОФИЛЬ И БАЛАНС
     # =================================================================
     elif data == "menu_profile":
         bot.answer_callback_query(call.id, "Проверяю баланс и профиль...")
@@ -1289,15 +1558,21 @@ def handle_callbacks(call):
         send_or_edit(chat_id, text, kb, msg_id)
 
     elif data == "change_bio":
-        msg = bot.send_message(chat_id, "✏️ Напишите новый текст для графы **«О себе»**:", parse_mode="Markdown")
+        msg = bot.send_message(
+            chat_id, "✏️ Напишите новый текст для графы **«О себе»**:", parse_mode="Markdown"
+        )
         bot.register_next_step_handler(msg, step_change_bio)
 
     elif data == "change_nickname":
-        msg = bot.send_message(chat_id, "🏷 Введите новый **Никнейм (имя профиля)** для Steam:", parse_mode="Markdown")
+        msg = bot.send_message(
+            chat_id, "🏷 Введите новый **Никнейм** для Steam:", parse_mode="Markdown"
+        )
         bot.register_next_step_handler(msg, step_change_nickname)
 
     elif data == "change_realname":
-        msg = bot.send_message(chat_id, "👤 Введите новое **Настоящее имя** для профиля Steam:", parse_mode="Markdown")
+        msg = bot.send_message(
+            chat_id, "👤 Введите новое **Настоящее имя** для профиля Steam:", parse_mode="Markdown"
+        )
         bot.register_next_step_handler(msg, step_change_realname)
 
     # =================================================================
@@ -1321,7 +1596,11 @@ def handle_callbacks(call):
         bot.answer_callback_query(call.id, "Проверяю раздачи...")
         count = check_giveaways()
         if count == 0:
-            notify_user(chat_id, "ℹ️ Новых неактивированных раздач сейчас нет.", reply_markup=get_main_keyboard())
+            notify_user(
+                chat_id,
+                "ℹ️ Новых неактивированных раздач сейчас нет.",
+                reply_markup=get_main_keyboard(),
+            )
 
     elif data == "menu_ping":
         uptime_min = int((time.time() - bot_status["start_time"]) // 60)
@@ -1341,7 +1620,7 @@ def handle_callbacks(call):
         )
         text = (
             f"📡 **Статус тихого самопинга (Без уведомлений)**\n\n"
-            f"🟢 Аптайм: `{uptime_min} мин.`\n"
+            f"🟢 Аптайм воркера: `{uptime_min} мин.`\n"
             f"🌐 URL: `{steam.data.get('render_url')}/ping`\n"
             f"⏱ Когда пинговался: **{ago_str}** (`{bot_status['last_ping_time']}`)\n"
             f"📊 Всего пингов: `{bot_status['ping_count']}`\n\n"
@@ -1358,38 +1637,44 @@ def handle_callbacks(call):
     elif data == "menu_system":
         kb = InlineKeyboardMarkup(row_width=1)
         kb.add(
-            InlineKeyboardButton("🔄 Обновить код бота (Скинуть код/файл)", callback_data="update_bot"),
+            InlineKeyboardButton(
+                "🔄 Обновить код бота (Текст / Файл / Ссылка)", callback_data="update_bot"
+            ),
+            InlineKeyboardButton("📥 Скачать текущий bot.py файлом", callback_data="sys_download_code"),
             InlineKeyboardButton("💾 Получить SESSION_BASE64", callback_data="get_b64"),
             InlineKeyboardButton("📥 Вставить SESSION_BASE64", callback_data="import_b64"),
             InlineKeyboardButton("⬅️ Назад в главное меню", callback_data="back_main"),
         )
         text = (
             f"⚙️ **Система и Автообновление**\n\n"
-            f"• Токен бота надежно хранится в файле `{TOK_FILE}`.\n"
-            f"• Нажмите **«🔄 Обновить код бота»**, скиньте новый `bot.py` — бот проверит синтаксис и сам перезапустится."
+            f"• Токен бота хранится в `{TOK_FILE}`.\n"
+            f"• Версия: `{steam.data.get('last_update_time', 'Базовая')}`.\n"
+            f"• Вы можете обновить бота вставкой длинного текста (с автосклейкой кусков), отправкой файла `.py` или по ссылке."
         )
         send_or_edit(chat_id, text, kb, msg_id)
 
-    elif data == "update_bot":
-        msg = bot.send_message(
-            chat_id,
-            "🔄 **Автообновление бота**\n\n"
-            "Скиньте новый файл `bot.py` документом или отправьте код текстом (для отмены напишите `отмена`):",
-            parse_mode="Markdown",
-        )
-        bot.register_next_step_handler(msg, step_update_bot_code)
+    elif data == "sys_download_code":
+        bot.answer_callback_query(call.id, "Отправляю текущий файл bot.py...")
+        with open(os.path.abspath(__file__), "rb") as f:
+            bot.send_document(chat_id, f, caption="📄 Текущий рабочий файл `bot.py`", parse_mode="Markdown")
 
     elif data == "login_steam":
-        msg = bot.send_message(chat_id, "🔑 **Шаг 1 из 3.** Отправьте ваш **логин Steam**:", parse_mode="Markdown")
+        msg = bot.send_message(
+            chat_id, "🔑 **Шаг 1 из 3.** Отправьте ваш **логин Steam**:", parse_mode="Markdown"
+        )
         bot.register_next_step_handler(msg, step_get_username)
 
     elif data == "import_b64":
-        msg = bot.send_message(chat_id, "📥 Отправьте строку `SESSION_BASE64`:", parse_mode="Markdown")
+        msg = bot.send_message(
+            chat_id, "📥 Отправьте строку `SESSION_BASE64`:", parse_mode="Markdown"
+        )
         bot.register_next_step_handler(msg, step_import_b64)
 
     elif data == "get_b64":
         b64 = export_session_b64(steam.data)
-        notify_user(chat_id, f"💾 **Ваш `SESSION_BASE64`:**\n\n`{b64}`", reply_markup=get_main_keyboard())
+        notify_user(
+            chat_id, f"💾 **Ваш `SESSION_BASE64`:**\n\n`{b64}`", reply_markup=get_main_keyboard()
+        )
 
     elif data == "test_f2p":
         kb = InlineKeyboardMarkup(row_width=2)
@@ -1401,19 +1686,25 @@ def handle_callbacks(call):
             InlineKeyboardButton("🔢 Ввести свой AppID", callback_data="f2p_custom"),
             InlineKeyboardButton("⬅️ Назад", callback_data="menu_library"),
         )
-        send_or_edit(chat_id, "🎮 Выберите бесплатную игру или введите свой `AppID`:", kb, msg_id)
+        send_or_edit(
+            chat_id, "🎮 Выберите бесплатную игру или введите свой `AppID`:", kb, msg_id
+        )
 
     elif data.startswith("f2p_"):
         target = data.replace("f2p_", "")
         if target == "custom":
-            msg = bot.send_message(chat_id, "🔢 Отправьте **AppID** бесплатной игры:", parse_mode="Markdown")
+            msg = bot.send_message(
+                chat_id, "🔢 Отправьте **AppID** бесплатной игры:", parse_mode="Markdown"
+            )
             bot.register_next_step_handler(msg, step_custom_f2p)
         else:
             bot.answer_callback_query(call.id, "Добавляю игру...")
             add_f2p_game(chat_id, target)
 
     elif data == "set_render_url":
-        msg = bot.send_message(chat_id, "🌐 Отправьте ссылку на ваш Render-сервис:", parse_mode="Markdown")
+        msg = bot.send_message(
+            chat_id, "🌐 Отправьте ссылку на ваш Render-сервис:", parse_mode="Markdown"
+        )
         bot.register_next_step_handler(msg, step_set_render_url)
 
 
@@ -1425,7 +1716,11 @@ def step_calc_get_appid(message):
     app_id = m.group(1) if m else re.sub(r"\D", "", text)
 
     if not app_id:
-        notify_user(chat_id, "❌ Не удалось распознать AppID. Попробуйте через «🔎 Поиск игры».", reply_markup=get_main_keyboard())
+        notify_user(
+            chat_id,
+            "❌ Не удалось распознать AppID. Попробуйте через «🔎 Поиск игры».",
+            reply_markup=get_main_keyboard(),
+        )
         return
     show_game_and_ask_discount(chat_id, app_id)
 
@@ -1433,32 +1728,41 @@ def step_calc_get_appid(message):
 def show_game_and_ask_discount(chat_id, app_id):
     info = steam.get_game_price_info(app_id)
     if not info:
-        notify_user(chat_id, f"❌ Игра с AppID `{app_id}` не найдена в магазине Steam.", reply_markup=get_main_keyboard())
+        notify_user(
+            chat_id,
+            f"❌ Игра с AppID `{app_id}` не найдена в магазине Steam.",
+            reply_markup=get_main_keyboard(),
+        )
         return
 
     if info["is_free"]:
         kb = InlineKeyboardMarkup().add(
-            InlineKeyboardButton("➕ Добавить в библиотеку бесплатно", callback_data=f"f2p_{app_id}"),
+            InlineKeyboardButton(
+                "➕ Добавить в библиотеку бесплатно", callback_data=f"f2p_{app_id}"
+            ),
             InlineKeyboardButton("⬅️ В главное меню", callback_data="back_main"),
         )
         notify_user(
             chat_id,
             f"🎮 **{info['name']}** (`{app_id}`)\n"
-            f"💰 Игра уже **бесплатная (0 ₸)**! Вы можете сразу добавить её в библиотеку:",
+            f"💰 Игра уже **бесплатная (0 ₸)**!",
             reply_markup=kb,
         )
         return
 
     calc_state[chat_id] = info
     cur_sale_txt = (
-        f"🔥 Сейчас со скидкой **-{info['discount']}%**: `{info['final_kzt']:g} ₸` (обычная цена: `{info['initial_kzt']:g} ₸`)"
+        f"🔥 Сейчас со скидкой **-{info['discount']}%**: `{info['final_kzt']:g} ₸` (обычная: `{info['initial_kzt']:g} ₸`)"
         if info["discount"] > 0
         else f"💰 Текущая цена в Steam: **`{info['initial_kzt']:g} ₸`** (без скидки)"
     )
 
     kb = InlineKeyboardMarkup(row_width=1)
     kb.add(
-        InlineKeyboardButton("🔔 Просто уведомить при ЛЮБОЙ скидке", callback_data=f"watch_set_any_{app_id}_1"),
+        InlineKeyboardButton(
+            "🔔 Просто уведомить при ЛЮБОЙ скидке",
+            callback_data=f"watch_set_any_{app_id}_1",
+        ),
         InlineKeyboardButton("⬅️ Отмена", callback_data="back_main"),
     )
 
@@ -1466,8 +1770,7 @@ def show_game_and_ask_discount(chat_id, app_id):
         chat_id,
         f"🎮 **Игра найдена: {info['name']}** (AppID: `{app_id}`)\n"
         f"{cur_sale_txt}\n\n"
-        f"🔢 **Введите желаемый процент скидки (число от `1` до `99`, например `50`):**\n"
-        f"Бот рассчитает точную стоимость игры со скидкой в **тенге (₸)** и предложит включить **автопокупку через 5–10 минут** или **уведомление**!",
+        f"🔢 **Введите желаемый процент скидки (от `1` до `99`, например `50`):**",
         parse_mode="Markdown",
         reply_markup=kb,
     )
@@ -1478,12 +1781,16 @@ def step_calc_discount_percent(message):
     chat_id = message.chat.id
     info = calc_state.get(chat_id)
     if not info:
-        notify_user(chat_id, "⚠️ Сессия калькулятора истекла, выберите игру заново.", reply_markup=get_main_keyboard())
+        notify_user(
+            chat_id, "⚠️ Выберите игру заново.", reply_markup=get_main_keyboard()
+        )
         return
 
     raw_num = re.sub(r"\D", "", message.text.strip())
     if not raw_num:
-        notify_user(chat_id, "❌ Введите число от 1 до 99.", reply_markup=get_main_keyboard())
+        notify_user(
+            chat_id, "❌ Введите число от 1 до 99.", reply_markup=get_main_keyboard()
+        )
         return
 
     target_disc = max(1, min(99, int(raw_num)))
@@ -1513,31 +1820,29 @@ def step_calc_discount_percent(message):
         chat_id,
         f"🧮 **Расчет скидки -{target_disc}% в тенге (₸):**\n\n"
         f"🎮 Игра: **{info['name']}** (`{app_id}`)\n"
-        f"💵 Полная цена без скидки: `{base_kzt:g} ₸`\n"
+        f"💵 Полная цена: `{base_kzt:g} ₸`\n"
         f"🏷 **Цена со скидкой -{target_disc}%:** **`{discounted_kzt:g} ₸`**\n"
-        f"💰 Ваша экономия: `{saved_kzt:g} ₸`\n\n"
-        f"👇 **Что сделать, когда на игру появится скидка -{target_disc}%?**",
+        f"💰 Экономия: `{saved_kzt:g} ₸`\n\n"
+        f"👇 **Выберите действие при появлении скидки -{target_disc}%:**",
         reply_markup=kb,
     )
 
 
 def trigger_delayed_autobuy(chat_id, app_id, game_name, cur_disc):
-    """Ждет случайные 5–10 минут после обнаружения целевой скидки и покупает игру."""
     if app_id in bot_status["autobuy_tasks"]:
         return
     bot_status["autobuy_tasks"].add(app_id)
 
-    delay_sec = random.randint(300, 600)  # 5 - 10 минут
+    delay_sec = random.randint(300, 600)
     delay_min = round(delay_sec / 60, 1)
 
     notify_user(
         chat_id,
         f"🎯 **Обнаружена целевая скидка -{cur_disc}% на «{game_name}»!**\n"
-        f"⏳ Запущен таймер автопокупки: покупка будет выполнена автоматически через **{delay_min} мин.**",
+        f"⏳ Запущен таймер автопокупки: покупка через **{delay_min} мин.**",
     )
 
     time.sleep(delay_sec)
-
     res = steam.auto_purchase_game(app_id)
     bot_status["autobuy_tasks"].discard(app_id)
 
@@ -1549,13 +1854,17 @@ def trigger_delayed_autobuy(chat_id, app_id, game_name, cur_disc):
     )
 
 
-# ----------------- ПОИСК, КЛЮЧИ, ПРОФИЛЬ И ОБНОВЛЕНИЕ -----------------
+# ----------------- ПОИСК, КЛЮЧИ, ПРОФИЛЬ -----------------
 def step_search_game(message):
     chat_id = message.chat.id
     query = message.text.strip()
     results = steam.search_games_by_name(query)
     if not results:
-        notify_user(chat_id, f"❌ По запросу «{query}» ничего не найдено.", reply_markup=get_main_keyboard())
+        notify_user(
+            chat_id,
+            f"❌ По запросу «{query}» ничего не найдено.",
+            reply_markup=get_main_keyboard(),
+        )
         return
 
     kb = InlineKeyboardMarkup(row_width=1)
@@ -1574,19 +1883,18 @@ def step_search_game(message):
 
 def step_redeem_key(message):
     chat_id = message.chat.id
-    key_str = message.text.strip()
-    res = steam.redeem_cd_key(key_str)
+    res = steam.redeem_cd_key(message.text.strip())
     if res.get("ok"):
         library_cache.pop(chat_id, None)
         notify_user(
             chat_id,
-            f"✅ **Ключ успешно активирован!**\n🎮 Добавлено в библиотеку: **{res.get('games') or 'Игра'}**",
+            f"✅ **Ключ активирован!**\n🎮 Игра: **{res.get('games') or 'Добавлена'}**",
             reply_markup=get_main_keyboard(),
         )
     else:
         notify_user(
             chat_id,
-            "❌ Не удалось активировать ключ (неверный формат, уже активирован или лимит попыток).",
+            "❌ Не удалось активировать ключ.",
             reply_markup=get_main_keyboard(),
         )
 
@@ -1594,70 +1902,43 @@ def step_redeem_key(message):
 def step_change_bio(message):
     val = message.text.strip()
     if steam.update_profile_field(summary=val):
-        notify_user(chat_id=message.chat.id, text=f"✅ **Графа «О себе» изменена:** `{val}`", reply_markup=get_main_keyboard())
+        notify_user(
+            message.chat.id,
+            f"✅ **Графа «О себе» изменена:** `{val}`",
+            reply_markup=get_main_keyboard(),
+        )
     else:
-        notify_user(chat_id=message.chat.id, text="❌ Ошибка обновления профиля.", reply_markup=get_main_keyboard())
+        notify_user(
+            message.chat.id, "❌ Ошибка обновления.", reply_markup=get_main_keyboard()
+        )
 
 
 def step_change_nickname(message):
     val = message.text.strip()
     if steam.update_profile_field(persona_name=val):
-        notify_user(chat_id=message.chat.id, text=f"✅ **Никнейм в Steam изменен на:** `{val}`", reply_markup=get_main_keyboard())
+        notify_user(
+            message.chat.id,
+            f"✅ **Никнейм изменен на:** `{val}`",
+            reply_markup=get_main_keyboard(),
+        )
     else:
-        notify_user(chat_id=message.chat.id, text="❌ Ошибка смены никнейма.", reply_markup=get_main_keyboard())
+        notify_user(
+            message.chat.id, "❌ Ошибка смены никнейма.", reply_markup=get_main_keyboard()
+        )
 
 
 def step_change_realname(message):
     val = message.text.strip()
     if steam.update_profile_field(real_name=val):
-        notify_user(chat_id=message.chat.id, text=f"✅ **Настоящее имя в профиле изменено на:** `{val}`", reply_markup=get_main_keyboard())
-    else:
-        notify_user(chat_id=message.chat.id, text="❌ Ошибка изменения имени.", reply_markup=get_main_keyboard())
-
-
-def step_update_bot_code(message):
-    chat_id = message.chat.id
-    if message.text and message.text.strip().lower() == "отмена":
-        notify_user(chat_id, "❎ Обновление отменено.", reply_markup=get_main_keyboard())
-        return
-
-    new_code = None
-    if message.document:
-        try:
-            file_info = bot.get_file(message.document.file_id)
-            new_code = bot.download_file(file_info.file_path).decode("utf-8")
-        except Exception as e:
-            notify_user(chat_id, f"❌ Ошибка чтения файла: {e}", reply_markup=get_main_keyboard())
-            return
-    elif message.text:
-        new_code = re.sub(r"^```[a-zA-Z]*\n", "", message.text.strip())
-        new_code = re.sub(r"\n```$", "", new_code)
-
-    if not new_code or len(new_code) < 50:
-        notify_user(chat_id, "❌ Код пустой или слишком короткий.", reply_markup=get_main_keyboard())
-        return
-
-    if "ВСТАВЬТЕ_СЮДА_ТОКЕН_БОТА" in new_code:
-        new_code = new_code.replace("ВСТАВЬТЕ_СЮДА_ТОКЕН_БОТА", TG_BOT_TOKEN)
-
-    try:
-        compile(new_code, "bot.py", "exec")
-    except SyntaxError as e:
         notify_user(
-            chat_id,
-            f"❌ **Ошибка синтаксиса в строке {e.lineno}:** `{e.msg}`\nСтарый бот продолжает работу.",
+            message.chat.id,
+            f"✅ **Настоящее имя изменено на:** `{val}`",
             reply_markup=get_main_keyboard(),
         )
-        return
-
-    try:
-        with open(os.path.abspath(__file__), "w", encoding="utf-8") as f:
-            f.write(new_code)
-        notify_user(chat_id, "✅ **Код обновлен! Перезапускаю бота (3 сек)... Напишите `/start`.**")
-        time.sleep(1)
-        os.execv(sys.executable, [sys.executable] + sys.argv)
-    except Exception as e:
-        notify_user(chat_id, f"❌ Ошибка перезапуска: {e}", reply_markup=get_main_keyboard())
+    else:
+        notify_user(
+            message.chat.id, "❌ Ошибка изменения имени.", reply_markup=get_main_keyboard()
+        )
 
 
 # ----------------- ЦИКЛ ПРОВЕРКИ СКИДОК И АВТОПОКУПКИ -----------------
@@ -1689,7 +1970,6 @@ def check_discounts(force_report=False):
                 f"• **{info['name']}** — без скидки (`{info['initial_kzt']:g} ₸`) [Цель: `-{target_disc}%`]"
             )
 
-        # Проверяем достижение целевой скидки
         if cur_disc >= target_disc and cur_disc != prev_disc and admin_id:
             if mode == "autobuy":
                 threading.Thread(
@@ -1702,7 +1982,7 @@ def check_discounts(force_report=False):
                     admin_id,
                     f"🔥 **СКИДКА ДОСТИГЛА ЦЕЛИ (-{cur_disc}%)!**\n\n"
                     f"🎮 **{info['name']}**\n"
-                    f"🏷 Новая цена со скидкой: **`{info['final_kzt']:g} ₸`** (было `{info['initial_kzt']:g} ₸`)\n"
+                    f"🏷 Новая цена: **`{info['final_kzt']:g} ₸`** (было `{info['initial_kzt']:g} ₸`)\n"
                     f"🔗 https://store.steampowered.com/app/{app_id}/",
                 )
 
@@ -1727,7 +2007,11 @@ def discounts_loop():
 def step_get_username(message):
     username = message.text.strip()
     pending_auth[message.chat.id] = {"username": username}
-    msg = bot.send_message(message.chat.id, f"🔒 **Шаг 2 из 3.** Отправьте **пароль** от `{username}`:", parse_mode="Markdown")
+    msg = bot.send_message(
+        message.chat.id,
+        f"🔒 **Шаг 2 из 3.** Отправьте **пароль** от `{username}`:",
+        parse_mode="Markdown",
+    )
     bot.register_next_step_handler(msg, step_get_password)
 
 
@@ -1759,9 +2043,17 @@ def step_get_guard_code(message):
     res = steam.atomic_login(auth_data["username"], auth_data["password"], guard_code)
     pending_auth.pop(chat_id, None)
     if res.get("ok"):
-        notify_user(chat_id, f"✅ **Успешный вход в `{steam.data.get('account_name')}`!**", reply_markup=get_main_keyboard())
+        notify_user(
+            chat_id,
+            f"✅ **Успешный вход в `{steam.data.get('account_name')}`!**",
+            reply_markup=get_main_keyboard(),
+        )
     else:
-        notify_user(chat_id, f"❌ **Ошибка:** {res.get('error')}", reply_markup=get_main_keyboard())
+        notify_user(
+            chat_id,
+            f"❌ **Ошибка:** {res.get('error')}",
+            reply_markup=get_main_keyboard(),
+        )
 
 
 def step_import_b64(message):
@@ -1774,7 +2066,11 @@ def step_import_b64(message):
         steam.data = decoded
         save_session(steam.data)
         ok, bal = steam.check_health()
-        notify_user(chat_id, f"✅ **Сессия импортирована!** Баланс: `{bal}`", reply_markup=get_main_keyboard())
+        notify_user(
+            chat_id,
+            f"✅ **Сессия импортирована!** Баланс: `{bal}`",
+            reply_markup=get_main_keyboard(),
+        )
     except Exception as e:
         notify_user(chat_id, f"❌ Ошибка: {e}", reply_markup=get_main_keyboard())
 
@@ -1788,14 +2084,24 @@ def step_custom_f2p(message):
 def add_f2p_game(chat_id, app_id):
     sub_id = steam.get_subid_from_appid(app_id)
     if not sub_id:
-        notify_user(chat_id, f"❌ Бесплатный SubID для `{app_id}` не найден.", reply_markup=get_main_keyboard())
+        notify_user(
+            chat_id,
+            f"❌ Бесплатный SubID для `{app_id}` не найден.",
+            reply_markup=get_main_keyboard(),
+        )
         return
     if steam.add_free_license(sub_id):
         bot_status["claimed_count"] += 1
         library_cache.pop(chat_id, None)
-        notify_user(chat_id, f"✅ **Игра добавлена в библиотеку!** (AppID: `{app_id}`)", reply_markup=get_main_keyboard())
+        notify_user(
+            chat_id,
+            f"✅ **Игра добавлена в библиотеку!** (AppID: `{app_id}`)",
+            reply_markup=get_main_keyboard(),
+        )
     else:
-        notify_user(chat_id, "❌ Ошибка активации лицензии.", reply_markup=get_main_keyboard())
+        notify_user(
+            chat_id, "❌ Ошибка активации лицензии.", reply_markup=get_main_keyboard()
+        )
 
 
 def step_set_render_url(message):
@@ -1810,7 +2116,11 @@ def step_set_render_url(message):
             json.dump(tok_config, f, indent=2, ensure_ascii=False)
     except Exception:
         pass
-    notify_user(chat_id=message.chat.id, text=f"✅ URL самопинга сохранен: `{url}/ping`", reply_markup=get_main_keyboard())
+    notify_user(
+        message.chat.id,
+        f"✅ URL самопинга сохранен: `{url}/ping`",
+        reply_markup=get_main_keyboard(),
+    )
 
 
 # ----------------- АВТОПОИСК 100% РАЗДАЧ -----------------
@@ -1823,7 +2133,10 @@ def check_giveaways():
     admin_id = steam.data.get("admin_id")
 
     try:
-        resp = requests.get("https://www.gamerpower.com/api/giveaways?platform=steam&type=game", timeout=15)
+        resp = requests.get(
+            "https://www.gamerpower.com/api/giveaways?platform=steam&type=game",
+            timeout=15,
+        )
         if resp.status_code != 200:
             return 0
         giveaways = resp.json()
@@ -1869,7 +2182,7 @@ def giveaway_loop():
         time.sleep(CHECK_GIVEAWAYS_INTERVAL)
 
 
-# ----------------- ТИХИЙ САМОПИНГ БЕЗ УВЕДОМЛЕНИЙ -----------------
+# ----------------- ТИХИЙ САМОПИНГ И ВЕБ-СЕРВЕР -----------------
 app = Flask(__name__)
 
 
@@ -1902,7 +2215,9 @@ def do_single_ping():
         bot_status["last_ping_time"] = now_str
         bot_status["last_ping_code"] = f"HTTP {r.status_code} ({ms} мс)"
         bot_status["ping_count"] += 1
-        bot_status["ping_history"].append(f"• `{now_str}` — ✅ HTTP {r.status_code} (`{ms} мс`)")
+        bot_status["ping_history"].append(
+            f"• `{now_str}` — ✅ HTTP {r.status_code} (`{ms} мс`)"
+        )
     except Exception:
         now_str = time.strftime("%H:%M:%S")
         bot_status["last_ping_ts"] = time.time()
@@ -1915,20 +2230,90 @@ def do_single_ping():
 
 
 def keep_alive_pinger():
-    time.sleep(15)
+    time.sleep(10)
     do_single_ping()
     while True:
         time.sleep(random.randint(180, 300))
         do_single_ping()
 
 
-if __name__ == "__main__":
+def notify_if_just_updated():
+    """Если бот только что перезапустился после автообновления, сразу пишет админу в ТГ."""
+    upd_flag = steam.data.pop("just_updated", None)
+    if upd_flag:
+        save_session(steam.data)
+        admin_id = steam.data.get("admin_id")
+        if admin_id:
+            time.sleep(1.5)
+            try:
+                notify_user(
+                    admin_id,
+                    f"🎉 **Автообновление успешно установлено (`{upd_flag}`)!**\n"
+                    f"Бот перезапущен и работает на новом коде.",
+                    reply_markup=get_main_keyboard(),
+                )
+            except Exception:
+                pass
+
+
+# =====================================================================
+# ЗАПУСК: СУПЕРВИЗОР (PID 1 ДЛЯ RENDER) + ПЕРЕЗАПУСКАЕМЫЙ ВОРКЕР БОТА
+# =====================================================================
+def run_supervisor():
+    """
+    Главный процесс (PID 1): держит порт Flask открытым для Render.com 24/7
+    и управляет дочерним процессом бота (перезапускает при обновлении и откатывает при сбое).
+    """
+    port = int(os.environ.get("PORT", 10000))
+    threading.Thread(
+        target=lambda: app.run(host="0.0.0.0", port=port, use_reloader=False),
+        daemon=True,
+    ).start()
+
+    script_path = os.path.abspath(__file__)
+    env = os.environ.copy()
+    env["BOT_WORKER_MODE"] = "1"
+
+    while True:
+        start_ts = time.time()
+        print("[Supervisor] Запуск рабочего процесса бота...")
+        proc = subprocess.Popen([sys.executable, script_path], env=env)
+        exit_code = proc.wait()
+        runtime = time.time() - start_ts
+
+        if exit_code == 42:
+            print("[Supervisor] Получен сигнал автообновления (код 42). Перезапуск через 2 сек...")
+            time.sleep(2)
+            continue
+
+        # Если новый код упал быстрее чем за 5 секунд после старта — восстанавливаем бэкап!
+        if runtime < 5 and os.path.exists(BACKUP_FILE):
+            print("[Supervisor] Воркер упал при старте! Восстанавливаю резервную копию bot.py.bak...")
+            try:
+                shutil.copyfile(BACKUP_FILE, script_path)
+            except Exception:
+                pass
+
+        time.sleep(3)
+
+
+def run_worker():
+    """Рабочий процесс Telegram-бота и фоновых задач Steam."""
     threading.Thread(target=giveaway_loop, daemon=True).start()
     threading.Thread(target=discounts_loop, daemon=True).start()
     threading.Thread(target=keep_alive_pinger, daemon=True).start()
-    threading.Thread(
-        target=lambda: bot.infinity_polling(skip_pending=True), daemon=True
-    ).start()
+    threading.Thread(target=notify_if_just_updated, daemon=True).start()
 
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    while True:
+        try:
+            bot.infinity_polling(skip_pending=True, timeout=20, long_polling_timeout=20)
+        except Exception as e:
+            print(f"[Worker] Ошибка polling: {e}")
+            time.sleep(3)
+
+
+if __name__ == "__main__":
+    if os.environ.get("BOT_WORKER_MODE") == "1":
+        run_worker()
+    else:
+        run_supervisor()
