@@ -2840,7 +2840,7 @@ def giveaway_loop():
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(16)
 
-HTML_DASHBOARD = """
+HTML_DASHBOARD = ""
 <!DOCTYPE html>
 <html lang="ru">
 <head>
