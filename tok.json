@@ -3,7 +3,7 @@
   "render_url": "https://myhub-yhxu.onrender.com",
   "web_password": "admin123",
   "gh_token": "",
-  "gh_repo": "ваш_логин_github/название_репозитория",
+  "gh_repo": "https://github.com/protonw96/myhub",
   "gh_path": "main.py",
   "gh_branch": "main"
 }
