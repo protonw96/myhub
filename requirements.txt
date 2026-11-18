@@ -2,4 +2,4 @@ requests
 rsa
 pyTelegramBotAPI
 flask
-
+httpx
