@@ -1,9 +1,11 @@
 {
-  "tg_bot_token": "8721976140:AAEHfoi-6aZ5S9Y0alYz_d0hKz_yUz26Ee0",
-  "render_url": "https://myhub-yhxu.onrender.com",
-  "web_password": "admin123",
-  "gh_token": "",
-  "gh_repo": "https://github.com/protonw96/myhub",
-  "gh_path": "main.py",
-  "gh_branch": "main"
+  "tg_bot_token": "9260941225:AAHNP8em27gDWxCKJTkkDArKgmxePNyb98E",
+  "tg_chat_id": "2069782132",
+  "playerok_cookies": [
+    {
+      "name": "token",
+      "value": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+      "domain": ".playerok.com"
+    }
+  ]
 }
